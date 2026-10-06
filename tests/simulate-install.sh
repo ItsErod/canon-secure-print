@@ -19,6 +19,10 @@ if grep -n 'src="${BASH_SOURCE\[0\]}"' install-mac.sh verify-mac.sh >/dev/null; 
   echo "BASH_SOURCE[0] is expanded without a default; a piped bash 3.2 installer aborts under set -u" >&2
   exit 1
 fi
+if ! grep -F 'https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip' install-mac.sh >/dev/null; then
+  echo "default Canon package URL is missing from install-mac.sh" >&2
+  exit 1
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/remax-sim.XXXXXX")"
 cleanup() { rm -rf "$work"; }
@@ -133,14 +137,19 @@ assert_installed
 grep -q 'Enter Name should show tsiogase' "$work/stdout.txt"
 [[ -f "$support/last-install.txt" ]]
 grep -q '^result=PASS$' "$support/last-install.txt"
-grep -q 'installer 1.0.1' "$work/stdout.txt"
+grep -q 'installer 1.1.0' "$work/stdout.txt"
+grep -q 'driver is already installed' "$work/install.log"
+if grep -q 'Downloading Canon driver package' "$work/install.log"; then
+  echo "downloaded a driver even though the PPD was already available" >&2
+  exit 1
+fi
 
 echo "=== install via stdin pipe (curl | sudo bash layout) ==="
 export REMAX_LOG="$work/install-stdin.log"
 cat "$isolated/install-mac.sh" | bash >"$work/stdout.txt"
 assert_report "$work/stdout.txt"
 assert_installed
-grep -q 'installer 1.0.1' "$work/stdout.txt"
+grep -q 'installer 1.1.0' "$work/stdout.txt"
 
 echo "=== verify ==="
 export REMAX_LOG="$work/verify.log"
@@ -177,8 +186,10 @@ grep -q 'Refusing to install' "$work/bad-stdout.txt"
 export REMAX_PPD_SOURCE="$work/driver.ppd"
 assert_installed
 
-echo "=== missing driver explains what to install ==="
+echo "=== missing driver explains what to install when no package URL is set ==="
 unset REMAX_PPD_SOURCE
+unset REMAX_CANON_PKG_URL || true
+export CANON_PKG_URL_DEFAULT=
 export REMAX_LOG="$work/missing.log"
 set +e
 bash "$isolated/install-mac.sh" >"$work/missing-stdout.txt" 2>"$work/missing-stderr.txt"
@@ -189,8 +200,167 @@ if [[ "$miss_rc" -eq 0 ]]; then
   exit 1
 fi
 grep -q 'CNMCIRAC5235S2.ppd.gz' "$work/missing-stdout.txt"
+grep -q 'Canon iR-ADV C5235/5240 PS' "$work/missing-stdout.txt"
+grep -q 'no package URL' "$work/missing-stdout.txt"
+if grep -q 'Downloading Canon driver package' "$work/missing-stdout.txt"; then
+  echo "missing-driver failure tried to download without a package URL" >&2
+  exit 1
+fi
 export REMAX_PPD_SOURCE="$work/driver.ppd"
 assert_installed
+
+# Fixture matches the Canon zip: PS_v4.17.22_mac.zip contains
+# PS_v4.17.22_mac.dmg, which contains mac-ps-v41722-00.dmg, which contains
+# Canon_PS_Installer.pkg (and a UFR package the installer must not pick).
+images="$work/images"
+outer_vol="$images/outer-volume"
+inner_vol="$images/inner-volume"
+mkdir -p "$outer_vol" "$inner_vol"
+printf 'FAKE_DMG\n%s\n' "$inner_vol" > "$outer_vol/mac-ps-v41722-00.dmg"
+printf 'FAKE_DMG\n%s\n' "$outer_vol" > "$images/PS_v4.17.22_mac.dmg"
+printf 'ps installer\n' > "$inner_vol/Canon_PS_Installer.pkg"
+printf 'ufr installer\n' > "$inner_vol/UFRII_Installer.pkg"
+python3 - "$images/PS_v4.17.22_mac.zip" "$images/PS_v4.17.22_mac.dmg" <<'PY'
+import sys
+import zipfile
+dest, dmg = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(dest, "w") as zf:
+    zf.write(dmg, "PS_v4.17.22_mac.dmg")
+    zf.writestr("__MACOSX/._PS_v4.17.22_mac.dmg", b"junk")
+PY
+python3 - "$images/flat-pkgs.zip" <<'PY'
+import sys
+import zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("UFRII_Installer.pkg", b"ufr")
+    zf.writestr("Canon_PS_Installer.pkg", b"ps")
+PY
+printf 'flat pkg\n' > "$images/Canon_PS_Installer.pkg"
+gzip -c "$work/driver.ppd" > "$work/driver.ppd.gz"
+
+export REMAX_DRIVER_PPD_DIR="$work/driver-ppds"
+export REMAX_INSTALLER="$ROOT/tests/fake-installer"
+export REMAX_HDIUTIL="$ROOT/tests/fake-hdiutil"
+export REMAX_FAKE_DRIVER_PPD="$work/driver.ppd.gz"
+export REMAX_FAKE_INSTALL_LOG="$work/fake-install.log"
+mkdir -p "$REMAX_DRIVER_PPD_DIR"
+
+clear_installed_driver() {
+  rm -f "${REMAX_DRIVER_PPD_DIR}/CNMCIRAC5235S2.ppd.gz" \
+        "${REMAX_DRIVER_PPD_DIR}/CNMCIRAC5235S2.ppd"
+  : > "$work/fake-install.log"
+}
+
+assert_selected_pkg() {
+  local got count
+  [[ -s "$work/fake-install.log" ]]
+  got="$(basename "$(tail -n 1 "$work/fake-install.log")")"
+  if [[ "$got" != "Canon_PS_Installer.pkg" ]]; then
+    echo "installed ${got}, expected Canon_PS_Installer.pkg" >&2
+    cat "$work/fake-install.log" >&2
+    exit 1
+  fi
+  count="$(grep -c . "$work/fake-install.log" || true)"
+  if [[ "$count" -ne 1 ]]; then
+    echo "installer ran ${count} times" >&2
+    cat "$work/fake-install.log" >&2
+    exit 1
+  fi
+}
+
+echo "=== missing driver installs nested Canon PS package then creates RemaxSecure ==="
+unset REMAX_PPD_SOURCE
+clear_installed_driver
+export CANON_PKG_URL_DEFAULT="file:///tmp/remax-should-not-use-default.zip"
+export REMAX_CANON_PKG_URL="file://${images}/PS_v4.17.22_mac.zip"
+run_install "$isolated/install-mac.sh" "$work/install-driver.log"
+assert_report "$work/stdout.txt"
+assert_installed
+assert_selected_pkg
+grep -q 'driver is not installed' "$work/stdout.txt"
+grep -q 'Using REMAX_CANON_PKG_URL' "$work/stdout.txt"
+grep -q 'Zip contains disk image PS_v4.17.22_mac.dmg' "$work/stdout.txt"
+grep -q 'Opening nested disk image mac-ps-v41722-00.dmg' "$work/stdout.txt"
+grep -q 'Selected package Canon_PS_Installer.pkg' "$work/stdout.txt"
+grep -q 'Running installer -pkg Canon_PS_Installer.pkg -target /' "$work/stdout.txt"
+grep -q 'Re-checking for CNMCIRAC5235S2.ppd.gz' "$work/stdout.txt"
+grep -q 'Driver PPD is present after package install' "$work/stdout.txt"
+[[ -f "${REMAX_DRIVER_PPD_DIR}/CNMCIRAC5235S2.ppd.gz" ]]
+
+echo "=== zip of packages selects Canon PS and not UFR ==="
+clear_installed_driver
+export REMAX_CANON_PKG_URL="file://${images}/flat-pkgs.zip"
+run_install "$isolated/install-mac.sh" "$work/install-flat-zip.log"
+assert_report "$work/stdout.txt"
+assert_installed
+assert_selected_pkg
+grep -q 'Selected package Canon_PS_Installer.pkg' "$work/stdout.txt"
+if grep -q 'Opening nested disk image' "$work/stdout.txt"; then
+  echo "flat zip was treated as a disk image" >&2
+  exit 1
+fi
+
+echo "=== flat .pkg URL installs and re-checks the PPD ==="
+clear_installed_driver
+export REMAX_CANON_PKG_URL="file://${images}/Canon_PS_Installer.pkg"
+run_install "$isolated/install-mac.sh" "$work/install-flat-pkg.log"
+assert_report "$work/stdout.txt"
+assert_installed
+assert_selected_pkg
+grep -q 'Re-checking for CNMCIRAC5235S2.ppd.gz' "$work/stdout.txt"
+
+echo "=== CANON_PKG_URL_DEFAULT is used when REMAX_CANON_PKG_URL is unset ==="
+clear_installed_driver
+unset REMAX_CANON_PKG_URL
+export CANON_PKG_URL_DEFAULT="file://${images}/PS_v4.17.22_mac.zip"
+run_install "$isolated/install-mac.sh" "$work/install-default-url.log"
+assert_report "$work/stdout.txt"
+assert_installed
+assert_selected_pkg
+grep -q 'Using default Canon package URL' "$work/stdout.txt"
+grep -q "Installing Canon iR-ADV C5235/5240 PS (CNMCIRAC5235S2) from file://${images}/PS_v4.17.22_mac.zip" "$work/stdout.txt"
+if grep -q 'Using REMAX_CANON_PKG_URL' "$work/stdout.txt"; then
+  echo "default URL path claimed REMAX_CANON_PKG_URL was set" >&2
+  exit 1
+fi
+
+echo "=== driver already on disk is not downloaded again ==="
+export REMAX_CANON_PKG_URL="file:///tmp/remax-no-such-canon-package.zip"
+export CANON_PKG_URL_DEFAULT="file:///tmp/remax-no-such-canon-default.zip"
+run_install "$isolated/install-mac.sh" "$work/install-already.log"
+assert_report "$work/stdout.txt"
+assert_installed
+grep -q 'driver is already installed' "$work/stdout.txt"
+if grep -q 'Downloading Canon driver package' "$work/stdout.txt"; then
+  echo "downloaded a driver even though CNMCIRAC5235S2.ppd.gz was present" >&2
+  exit 1
+fi
+
+echo "=== package download failure names the Canon package ==="
+clear_installed_driver
+export REMAX_CANON_PKG_URL="file:///tmp/remax-no-such-canon-package.zip"
+export REMAX_LOG="$work/download-fail.log"
+set +e
+bash "$isolated/install-mac.sh" >"$work/download-fail-stdout.txt" 2>"$work/download-fail-stderr.txt"
+fail_rc=$?
+set -e
+if [[ "$fail_rc" -eq 0 ]]; then
+  echo "failed download was treated as success" >&2
+  exit 1
+fi
+grep -q 'CNMCIRAC5235S2.ppd.gz' "$work/download-fail-stdout.txt"
+grep -q 'Canon iR-ADV C5235/5240 PS' "$work/download-fail-stdout.txt"
+grep -q 'file:///tmp/remax-no-such-canon-package.zip' "$work/download-fail-stdout.txt"
+assert_installed
+
+unset REMAX_CANON_PKG_URL || true
+unset CANON_PKG_URL_DEFAULT || true
+unset REMAX_INSTALLER || true
+unset REMAX_HDIUTIL || true
+unset REMAX_DRIVER_PPD_DIR || true
+unset REMAX_FAKE_DRIVER_PPD || true
+unset REMAX_FAKE_INSTALL_LOG || true
+export REMAX_PPD_SOURCE="$work/driver.ppd"
 
 echo "=== username required when there is no terminal ==="
 export REMAX_LOG="$work/nouser.log"

@@ -14,6 +14,12 @@
 #
 # This script never edits /etc/cups/ppd in place. It stages a PPD, patches it,
 # and attaches that file with lpadmin -P.
+#
+# If CNMCIRAC5235S2.ppd.gz is missing, the script downloads the Canon PS
+# driver and installs it before creating the queue. REMAX_CANON_PKG_URL
+# overrides the built-in package URL. curl | sudo bash still works: the
+# Perl helper is embedded, and BASH_SOURCE is read with a default so
+# macOS bash 3.2 does not abort under set -u.
 
 if [ -z "${BASH_VERSION:-}" ]; then
   echo "Run this installer with bash, not sh." >&2
@@ -23,14 +29,29 @@ fi
 set -u
 set -o pipefail
 
-VERSION="1.0.1"
+VERSION="1.1.0"
 RAW_INSTALL_URL="https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh"
+
+# Proprietary Canon PS driver. Not stored in this repo.
+# Export CANON_PKG_URL_DEFAULT (including an empty value) to replace this.
+# REMAX_CANON_PKG_URL overrides it for a single run.
+if [[ "${CANON_PKG_URL_DEFAULT+set}" != "set" ]]; then
+  CANON_PKG_URL_DEFAULT="https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip"
+fi
+CANON_PKG_LABEL="Canon iR-ADV C5235/5240 PS (CNMCIRAC5235S2)"
 
 QUEUE="RemaxSecure"
 STALE_QUEUE="RemaxSecure_COLOUR"
 URI="${REMAX_PRINTER_URI:-lpd://172.16.105.21/RemaxSecure}"
-PPD_GZ="/Library/Printers/PPDs/Contents/Resources/CNMCIRAC5235S2.ppd.gz"
-PPD_PLAIN="/Library/Printers/PPDs/Contents/Resources/CNMCIRAC5235S2.ppd"
+if [[ "${REMAX_TEST_MODE:-}" == "1" && -n "${REMAX_DRIVER_PPD_DIR:-}" ]]; then
+  DRIVER_RESOURCE_DIR="${REMAX_DRIVER_PPD_DIR}"
+  DRIVER_SEARCH_ROOT="${REMAX_DRIVER_PPD_DIR}"
+else
+  DRIVER_RESOURCE_DIR="/Library/Printers/PPDs/Contents/Resources"
+  DRIVER_SEARCH_ROOT="/Library/Printers"
+fi
+PPD_GZ="${DRIVER_RESOURCE_DIR}/CNMCIRAC5235S2.ppd.gz"
+PPD_PLAIN="${DRIVER_RESOURCE_DIR}/CNMCIRAC5235S2.ppd"
 
 LOG=""
 SUPPORT=""
@@ -755,8 +776,10 @@ Remax Secure Printer installer ${VERSION} (macOS, terminal only)
 Environment:
   REMAX_PRINT_USER       Print username (Enter Name). Prompted from /dev/tty if unset.
   REMAX_CONSOLE_USER     Override the console Mac user stored as owner.
-  REMAX_CANON_PKG_URL    Optional http(s) URL of a Canon .pkg, .dmg, or .zip to
-                         install when CNMCIRAC5235S2 is not already on the Mac.
+  CANON_PKG_URL_DEFAULT  Package used when CNMCIRAC5235S2 is missing.
+                         Default: https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip
+  REMAX_CANON_PKG_URL    Overrides CANON_PKG_URL_DEFAULT for one run.
+                         A flat .pkg, a .dmg that contains a .pkg, or a .zip.
   REMAX_PRINTER_URI      Default: lpd://172.16.105.21/RemaxSecure
 
 The Canon CUPS PS Printer Utility reads Enter Name from the colon-form
@@ -963,20 +986,33 @@ run_cmd() {
 }
 
 print_driver_help() {
+  local tried="${1:-}"
   cat <<EOF
 The Canon PS driver for iR-ADV C5235/5240 is not installed on this Mac.
-This installer does not ship the Canon driver.
-
+Expected package: ${CANON_PKG_LABEL}
 Expected file (either one):
   ${PPD_GZ}
   ${PPD_PLAIN}
 
-On the RE/MAX Escarpment fleet this package is usually already installed.
-Install "Canon iR-ADV C5235/5240 PS" (CUPS PS, model CNMCIRAC5235S2), then
-run this installer again.
+The default download is:
+  ${CANON_PKG_URL_DEFAULT:-"(none)"}
 
-To have this script install a package you host, set REMAX_CANON_PKG_URL to
-an http(s) URL ending in .pkg, .dmg, or .zip:
+That zip is PS_v4.17.22_mac.zip. It contains PS_v4.17.22_mac.dmg, which
+contains mac-ps-v41722-00.dmg, which contains Canon_PS_Installer.pkg.
+This script installs that package as root, then looks again for
+CNMCIRAC5235S2.ppd.gz (or the same file without .gz).
+
+A flat .pkg, a .dmg that contains a .pkg (or another .dmg), or a .zip
+that contains either is accepted. REMAX_CANON_PKG_URL overrides the
+default for one run.
+EOF
+  if [[ -z "${CANON_PKG_URL_DEFAULT:-}" && -z "$tried" ]]; then
+    printf 'No package URL is configured. Set CANON_PKG_URL_DEFAULT or REMAX_CANON_PKG_URL.\n'
+  fi
+  if [[ -n "$tried" ]]; then
+    printf 'Package URL tried:\n  %s\n' "$tried"
+  fi
+  cat <<EOF
 
   curl -fsSL ${RAW_INSTALL_URL} | sudo \\
     REMAX_CANON_PKG_URL='https://example.invalid/CanonPS.pkg' \\
@@ -1003,8 +1039,8 @@ find_driver_ppd() {
     DRIVER_PPD_PATH="$PPD_PLAIN"
     return 0
   fi
-  if [[ -d /Library/Printers ]]; then
-    found="$(find /Library/Printers \( -name 'CNMCIRAC5235S2.ppd.gz' -o -name 'CNMCIRAC5235S2.ppd' \) 2>/dev/null | head -n 1 || true)"
+  if [[ -d "$DRIVER_SEARCH_ROOT" ]]; then
+    found="$(find "$DRIVER_SEARCH_ROOT" \( -name 'CNMCIRAC5235S2.ppd.gz' -o -name 'CNMCIRAC5235S2.ppd' \) 2>/dev/null | head -n 1 || true)"
   fi
   if [[ -n "$found" && -f "$found" ]]; then
     DRIVER_PPD_PATH="$found"
@@ -1027,45 +1063,187 @@ stage_driver() {
   esac
 }
 
+tool_path() {
+  if [[ -n "$1" ]]; then
+    printf '%s\n' "$1"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
+have_tool() {
+  local t="$1"
+  [[ -x "$t" ]] || command -v "$t" >/dev/null 2>&1
+}
+
+# Skip AppleDouble files and component packages nested inside a .pkg bundle.
+# stdout is a path list. Do not call say from here; callers capture stdout.
+list_archive_files() {
+  local root="$1" name="$2" out="$3" raw p
+  : > "$out"
+  raw="$(mktemp "${WORKDIR}/find.XXXXXX")"
+  find "$root" -name "$name" -print > "$raw" 2>/dev/null || true
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    case "$p" in
+      */__MACOSX/*|*/._*|._*) continue ;;
+      *.pkg/*|*.mpkg/*) continue ;;
+    esac
+    printf '%s\n' "$p" >> "$out"
+  done < "$raw"
+  rm -f "$raw"
+}
+
+pkg_score() {
+  local base score=0
+  base="$(basename "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$base" in
+    *cnmcirac5235*|*c5235*|*c5240*) score=$((score + 10)) ;;
+  esac
+  case "$base" in
+    *ps*) score=$((score + 3)) ;;
+  esac
+  case "$base" in
+    *installer*) score=$((score + 2)) ;;
+  esac
+  case "$base" in
+    *ufr*) score=$((score - 8)) ;;
+  esac
+  printf '%s\n' "$score"
+}
+
+# Print the chosen .pkg path. On failure, leave names in
+# ${WORKDIR}/pkg-candidates.txt when any packages were seen.
+choose_pkg() {
+  local root="$1" list mpkg count p score best="" best_score=-100
+  : > "${WORKDIR}/pkg-candidates.txt"
+  list="$(mktemp "${WORKDIR}/pkgs.XXXXXX")"
+  mpkg="$(mktemp "${WORKDIR}/mpkgs.XXXXXX")"
+  list_archive_files "$root" '*.pkg' "$list"
+  list_archive_files "$root" '*.mpkg' "$mpkg"
+  cat "$mpkg" >> "$list"
+  rm -f "$mpkg"
+  cp "$list" "${WORKDIR}/pkg-candidates.txt"
+  count="$(grep -c . "$list" || true)"
+  if [[ "$count" -eq 0 ]]; then
+    : > "${WORKDIR}/pkg-candidates.txt"
+    rm -f "$list"
+    return 1
+  fi
+  if [[ "$count" -eq 1 ]]; then
+    cat "$list"
+    rm -f "$list"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    score="$(pkg_score "$p")"
+    if [[ "$score" -gt "$best_score" ]]; then
+      best_score="$score"
+      best="$p"
+    fi
+  done < "$list"
+  rm -f "$list"
+  if [[ -z "$best" || "$best_score" -lt 1 ]]; then
+    return 1
+  fi
+  printf '%s\n' "$best"
+}
+
+choose_dmg() {
+  local root="$1" list count p base chosen=""
+  list="$(mktemp "${WORKDIR}/dmgs.XXXXXX")"
+  list_archive_files "$root" '*.dmg' "$list"
+  count="$(grep -c . "$list" || true)"
+  if [[ "$count" -eq 0 ]]; then
+    rm -f "$list"
+    return 1
+  fi
+  if [[ "$count" -eq 1 ]]; then
+    cat "$list"
+    rm -f "$list"
+    return 0
+  fi
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    base="$(basename "$p" | tr '[:upper:]' '[:lower:]')"
+    case "$base" in
+      *ps*) chosen="$p"; break ;;
+    esac
+  done < "$list"
+  if [[ -z "$chosen" ]]; then
+    chosen="$(head -n 1 "$list")"
+  fi
+  rm -f "$list"
+  if [[ -z "$chosen" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$chosen"
+}
+
 install_flat_pkg() {
-  local pkg="$1"
-  if ! command -v installer >/dev/null 2>&1; then
+  local pkg="$1" inst
+  inst="$(tool_path "${REMAX_INSTALLER:-}" installer)"
+  if ! have_tool "$inst"; then
     say "installer(8) is not available on this Mac."
     return 1
   fi
-  run_cmd installer -pkg "$pkg" -target /
+  if [[ "${REMAX_TEST_MODE:-}" != "1" && "$(id -u)" -ne 0 ]]; then
+    say "The Canon package must be installed as root (installer -pkg ... -target /)."
+    return 1
+  fi
+  say "Running installer -pkg $(basename "$pkg") -target /"
+  run_cmd "$inst" -pkg "$pkg" -target /
 }
 
 install_from_dmg() {
   local dmg="$1"
-  local mount="${WORKDIR}/dmg-mount"
-  local pkg=""
-  mkdir -p "$mount"
-  if ! command -v hdiutil >/dev/null 2>&1; then
+  local depth="${2:-0}"
+  local mount="${WORKDIR}/dmg-mount-${depth}"
+  local hdi rc=1 pkg="" nested=""
+  if [[ "$depth" -gt 3 ]]; then
+    say "Driver disk image is nested too deeply."
+    return 1
+  fi
+  hdi="$(tool_path "${REMAX_HDIUTIL:-}" hdiutil)"
+  if ! have_tool "$hdi"; then
     say "hdiutil is not available; cannot open the driver disk image."
     return 1
   fi
-  say "Mounting Canon driver disk image"
-  if ! hdiutil attach -nobrowse -mountpoint "$mount" "$dmg" >>"$LOG" 2>&1; then
+  rm -rf "$mount"
+  mkdir -p "$mount"
+  say "Mounting Canon driver disk image $(basename "$dmg")"
+  if ! "$hdi" attach -nobrowse -mountpoint "$mount" "$dmg" >>"$LOG" 2>&1; then
     say "Could not mount the driver disk image. See ${LOG}"
     return 1
   fi
-  pkg="$(find "$mount" -name '*.pkg' -print 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$pkg" ]]; then
-    hdiutil detach "$mount" >>"$LOG" 2>&1 || true
-    say "The disk image does not contain a .pkg."
-    return 1
+  if pkg="$(choose_pkg "$mount")"; then
+    say "Selected package $(basename "$pkg")"
+    install_flat_pkg "$pkg"
+    rc=$?
+  elif [[ -s "${WORKDIR}/pkg-candidates.txt" ]]; then
+    say "Could not choose a Canon iR-ADV C5235/5240 PS package from $(basename "$dmg")."
+    while IFS= read -r pkg; do
+      [[ -n "$pkg" ]] && say "  $(basename "$pkg")"
+    done < "${WORKDIR}/pkg-candidates.txt"
+    rc=1
+  elif nested="$(choose_dmg "$mount")"; then
+    say "Opening nested disk image $(basename "$nested")"
+    install_from_dmg "$nested" "$((depth + 1))"
+    rc=$?
+  else
+    say "The disk image does not contain a Canon .pkg."
+    rc=1
   fi
-  install_flat_pkg "$pkg"
-  local rc=$?
-  hdiutil detach "$mount" >>"$LOG" 2>&1 || true
+  "$hdi" detach "$mount" >>"$LOG" 2>&1 || true
   return "$rc"
 }
 
 install_from_zip() {
   local zip="$1"
   local dest="${WORKDIR}/pkg-unzip"
-  local pkg=""
+  local pkg="" dmg=""
+  rm -rf "$dest"
   mkdir -p "$dest"
   if ! command -v unzip >/dev/null 2>&1; then
     say "unzip is not available."
@@ -1075,33 +1253,105 @@ install_from_zip() {
     say "Could not unzip the driver package."
     return 1
   fi
-  pkg="$(find "$dest" -name '*.pkg' -print 2>/dev/null | head -n 1 || true)"
-  if [[ -z "$pkg" ]]; then
-    say "The zip does not contain a .pkg."
+  if pkg="$(choose_pkg "$dest")"; then
+    say "Selected package $(basename "$pkg")"
+    install_flat_pkg "$pkg"
+    return $?
+  fi
+  if [[ -s "${WORKDIR}/pkg-candidates.txt" ]]; then
+    say "Could not choose a Canon iR-ADV C5235/5240 PS package from the zip."
+    while IFS= read -r pkg; do
+      [[ -n "$pkg" ]] && say "  $(basename "$pkg")"
+    done < "${WORKDIR}/pkg-candidates.txt"
     return 1
   fi
-  install_flat_pkg "$pkg"
+  if dmg="$(choose_dmg "$dest")"; then
+    say "Zip contains disk image $(basename "$dmg")"
+    install_from_dmg "$dmg" 0
+    return $?
+  fi
+  say "The zip does not contain a .pkg or a .dmg."
+  return 1
+}
+
+archive_kind() {
+  local path="${1%%\?*}"
+  path="${path%%#*}"
+  path="$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')"
+  case "$path" in
+    *.dmg) printf 'dmg\n' ;;
+    *.zip) printf 'zip\n' ;;
+    *) printf 'pkg\n' ;;
+  esac
+}
+
+download_dest_for_url() {
+  local url="$1" path base
+  path="${url%%\?*}"
+  path="${path%%#*}"
+  base="$(basename "$path")"
+  case "$base" in
+    ""|.) base="canon-driver.download" ;;
+    *[!A-Za-z0-9._-]*) base="canon-driver.download" ;;
+  esac
+  printf '%s\n' "${WORKDIR}/${base}"
 }
 
 install_driver_url() {
   local url="$1"
-  local dest="${WORKDIR}/canon-driver.download"
-  local lower
-  say "Downloading Canon driver package"
+  local dest kind
+  dest="$(download_dest_for_url "$url")"
+  say "Downloading Canon driver package from ${url}"
   if ! command -v curl >/dev/null 2>&1; then
     say "curl is not available."
     return 1
   fi
-  if ! curl -fL --retry 3 --retry-delay 2 -o "$dest" "$url" >>"$LOG" 2>&1; then
-    say "Download failed. See ${LOG}"
+  if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 -o "$dest" "$url" >>"$LOG" 2>&1; then
+    say "Download failed: ${url}. See ${LOG}"
     return 1
   fi
-  lower="$(printf '%s' "$url" | tr '[:upper:]' '[:lower:]')"
-  case "$lower" in
-    *.dmg) install_from_dmg "$dest" ;;
-    *.zip) install_from_zip "$dest" ;;
+  kind="$(archive_kind "$url")"
+  case "$kind" in
+    dmg) install_from_dmg "$dest" 0 ;;
+    zip) install_from_zip "$dest" ;;
     *) install_flat_pkg "$dest" ;;
   esac
+}
+
+ensure_canon_driver() {
+  local url=""
+  if find_driver_ppd; then
+    say "Canon iR-ADV C5235/5240 PS driver is already installed (${DRIVER_PPD_PATH})"
+    return 0
+  fi
+  say "Canon iR-ADV C5235/5240 PS driver is not installed."
+  say "Missing ${PPD_GZ}"
+  say "Missing ${PPD_PLAIN}"
+  if [[ -n "${REMAX_CANON_PKG_URL:-}" ]]; then
+    url="${REMAX_CANON_PKG_URL}"
+    say "Using REMAX_CANON_PKG_URL"
+  elif [[ -n "${CANON_PKG_URL_DEFAULT:-}" ]]; then
+    url="${CANON_PKG_URL_DEFAULT}"
+    say "Using default Canon package URL"
+  fi
+  if [[ -z "$url" ]]; then
+    print_driver_help "" | tee -a "$LOG"
+    D_DRIVER="Canon iR-ADV C5235/5240 PS (CNMCIRAC5235S2) is not installed and no package URL is configured"
+    finalize_report 1
+  fi
+  say "Installing ${CANON_PKG_LABEL} from ${url}"
+  if ! install_driver_url "$url"; then
+    print_driver_help "$url" | tee -a "$LOG"
+    D_DRIVER="Canon iR-ADV C5235/5240 PS package install failed and CNMCIRAC5235S2.ppd.gz is still missing"
+    finalize_report 1
+  fi
+  say "Re-checking for CNMCIRAC5235S2.ppd.gz"
+  if ! find_driver_ppd; then
+    print_driver_help "$url" | tee -a "$LOG"
+    D_DRIVER="Package ran but CNMCIRAC5235S2.ppd.gz is still not installed"
+    finalize_report 1
+  fi
+  say "Driver PPD is present after package install (${DRIVER_PPD_PATH})"
 }
 
 ppd_has_defaults() {
@@ -1300,25 +1550,7 @@ main_install() {
   log_preference_paths
   remove_stale_queue
 
-  if ! find_driver_ppd; then
-    if [[ -n "${REMAX_CANON_PKG_URL:-}" ]]; then
-      say "Driver PPD not found; trying REMAX_CANON_PKG_URL"
-      if ! install_driver_url "${REMAX_CANON_PKG_URL}"; then
-        print_driver_help | tee -a "$LOG"
-        D_DRIVER="Canon package install failed and CNMCIRAC5235S2 is still missing"
-        finalize_report 1
-      fi
-      if ! find_driver_ppd; then
-        print_driver_help | tee -a "$LOG"
-        D_DRIVER="Package ran but CNMCIRAC5235S2 PPD is still not installed"
-        finalize_report 1
-      fi
-    else
-      print_driver_help | tee -a "$LOG"
-      D_DRIVER="Canon iR-ADV C5235/5240 PS PPD (CNMCIRAC5235S2) is not installed"
-      finalize_report 1
-    fi
-  fi
+  ensure_canon_driver
 
   say "Using driver PPD ${DRIVER_PPD_PATH}"
   if ! stage_driver; then

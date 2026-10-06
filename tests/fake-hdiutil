@@ -1,0 +1,53 @@
+#!/bin/bash
+# Stand-in for hdiutil used by tests/simulate-install.sh.
+#
+# A fake disk image is a text file:
+#   FAKE_DMG
+#   /path/to/volume-directory
+# attach copies that directory onto the mount point. detach is a no-op.
+
+set -euo pipefail
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  attach)
+    mount=""
+    dmg=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        -nobrowse|-readonly)
+          shift
+          ;;
+        -mountpoint)
+          mount="${2:-}"
+          shift 2
+          ;;
+        *)
+          dmg="$1"
+          shift
+          ;;
+      esac
+    done
+    if [[ -z "$mount" || -z "$dmg" || ! -f "$dmg" ]]; then
+      echo "fake-hdiutil: attach needs -mountpoint and a dmg file" >&2
+      exit 1
+    fi
+    kind="$(sed -n '1p' "$dmg" | tr -d '\r')"
+    src="$(sed -n '2p' "$dmg" | tr -d '\r')"
+    if [[ "$kind" != "FAKE_DMG" || -z "$src" || ! -d "$src" ]]; then
+      echo "fake-hdiutil: not a fake disk image: $dmg" >&2
+      exit 1
+    fi
+    mkdir -p "$mount"
+    cp -R "$src"/. "$mount"/
+    ;;
+  detach)
+    exit 0
+    ;;
+  *)
+    echo "fake-hdiutil: unknown command: ${cmd:-}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,55 @@
+#!/bin/bash
+# Stand-in for installer(8) used by tests/simulate-install.sh.
+# Records the package path and drops the Canon C5235 PPD where the
+# installer looks after a successful package install.
+
+set -euo pipefail
+
+pkg=""
+target=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -pkg)
+      pkg="$2"
+      shift 2
+      ;;
+    -target)
+      target="$2"
+      shift 2
+      ;;
+    *)
+      echo "fake-installer: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$pkg" || ! -f "$pkg" ]]; then
+  echo "fake-installer: package missing: ${pkg:-}" >&2
+  exit 1
+fi
+if [[ "$target" != "/" ]]; then
+  echo "fake-installer: expected -target /" >&2
+  exit 1
+fi
+
+base="$(basename "$pkg")"
+case "$base" in
+  *UFR*|*ufr*)
+    echo "fake-installer: refusing ${base}" >&2
+    exit 1
+    ;;
+esac
+
+dir="${REMAX_DRIVER_PPD_DIR:?REMAX_DRIVER_PPD_DIR is required}"
+src="${REMAX_FAKE_DRIVER_PPD:?REMAX_FAKE_DRIVER_PPD is required}"
+mkdir -p "$dir"
+if [[ "$src" == *.gz || "$src" == *.GZ ]]; then
+  cp "$src" "${dir}/CNMCIRAC5235S2.ppd.gz"
+else
+  cp "$src" "${dir}/CNMCIRAC5235S2.ppd"
+fi
+
+if [[ -n "${REMAX_FAKE_INSTALL_LOG:-}" ]]; then
+  printf '%s\n' "$pkg" >> "${REMAX_FAKE_INSTALL_LOG}"
+fi
