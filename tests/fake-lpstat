@@ -1,0 +1,65 @@
+#!/bin/bash
+# Stand-in for lpstat used by tests/simulate-install.sh.
+
+set -euo pipefail
+
+ppd_dir="${REMAX_CUPS_PPD_DIR:?}"
+state="${REMAX_CUPS_STATE:?}"
+
+mode=""
+queue=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -p)
+      mode="p"
+      queue="${2:-}"
+      shift
+      if [[ $# -gt 0 ]]; then
+        shift
+      fi
+      ;;
+    -v)
+      mode="v"
+      queue="${2:-}"
+      shift
+      if [[ $# -gt 0 ]]; then
+        shift
+      fi
+      ;;
+    *)
+      echo "fake-lpstat: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$queue" ]]; then
+  echo "fake-lpstat: missing queue" >&2
+  exit 2
+fi
+
+present=0
+if [[ -f "$ppd_dir/$queue.ppd" || -f "$state/$queue.uri" ]]; then
+  present=1
+fi
+
+if [[ "$mode" == "p" ]]; then
+  if [[ "$present" -eq 1 ]]; then
+    echo "printer $queue is idle.  enabled since $(date)"
+    exit 0
+  fi
+  echo "lpstat: Invalid destination name in list \"$queue\"!" >&2
+  exit 1
+fi
+
+if [[ "$mode" == "v" ]]; then
+  if [[ -f "$state/$queue.uri" ]]; then
+    echo "device for $queue: $(cat "$state/$queue.uri")"
+    exit 0
+  fi
+  echo "lpstat: Invalid destination name in list \"$queue\"!" >&2
+  exit 1
+fi
+
+echo "fake-lpstat: no mode" >&2
+exit 2

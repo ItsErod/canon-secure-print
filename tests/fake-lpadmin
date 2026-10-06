@@ -1,0 +1,114 @@
+#!/bin/bash
+# Stand-in for lpadmin used by tests/simulate-install.sh.
+# Copies -P files into REMAX_CUPS_PPD_DIR and records the device URI.
+# REMAX_FAKE_DROP_ON_O=1 makes -o wipe the hardware defaults, so the
+# installer must re-attach with lpadmin -P.
+
+set -euo pipefail
+
+ppd_dir="${REMAX_CUPS_PPD_DIR:?REMAX_CUPS_PPD_DIR is required}"
+state="${REMAX_CUPS_STATE:?REMAX_CUPS_STATE is required}"
+mkdir -p "$ppd_dir" "$state"
+printf '%s\n' "$*" >> "$state/lpadmin.log"
+
+queue=""
+uri=""
+ppdfile=""
+delete=0
+opts=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -E)
+      shift
+      ;;
+    -p)
+      queue="$2"
+      shift 2
+      ;;
+    -v)
+      uri="$2"
+      shift 2
+      ;;
+    -P)
+      ppdfile="$2"
+      shift 2
+      ;;
+    -D|-L)
+      shift 2
+      ;;
+    -x)
+      delete=1
+      queue="$2"
+      shift 2
+      ;;
+    -o)
+      opts+=("$2")
+      shift 2
+      ;;
+    *)
+      echo "fake-lpadmin: unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$queue" ]]; then
+  echo "fake-lpadmin: missing queue" >&2
+  exit 2
+fi
+
+if [[ "$delete" -eq 1 ]]; then
+  rm -f "$ppd_dir/$queue.ppd" "$state/$queue.uri"
+  exit 0
+fi
+
+dest="$ppd_dir/$queue.ppd"
+if [[ -n "$ppdfile" ]]; then
+  if [[ ! -f "$ppdfile" ]]; then
+    echo "fake-lpadmin: PPD not found: $ppdfile" >&2
+    exit 1
+  fi
+  cp "$ppdfile" "$dest"
+fi
+
+if [[ -n "$uri" ]]; then
+  printf '%s\n' "$uri" > "$state/$queue.uri"
+fi
+
+if [[ ${#opts[@]} -eq 0 ]]; then
+  exit 0
+fi
+
+if [[ ! -f "$dest" ]]; then
+  echo "fake-lpadmin: -o without an installed PPD for $queue" >&2
+  exit 1
+fi
+
+if [[ "${REMAX_FAKE_DROP_ON_O:-}" == "1" ]]; then
+  perl -i -pe 's/^\*DefaultCNSrcOption:.*/\*DefaultCNSrcOption: None/;
+               s/^\*DefaultCNFinisher:.*/\*DefaultCNFinisher: None/;
+               s/^\*DefaultCNDuplex:.*/\*DefaultCNDuplex: DuplexFront/' "$dest"
+  exit 0
+fi
+
+for opt in "${opts[@]}"; do
+  key="${opt%%=*}"
+  val="${opt#*=}"
+  case "$key" in
+    CNSrcOption)
+      perl -i -pe 's/^\*DefaultCNSrcOption:.*/\*DefaultCNSrcOption: '"$val"'/' "$dest"
+      ;;
+    CNFinisher)
+      perl -i -pe 's/^\*DefaultCNFinisher:.*/\*DefaultCNFinisher: '"$val"'/' "$dest"
+      ;;
+    CNDuplex)
+      perl -i -pe 's/^\*DefaultCNDuplex:.*/\*DefaultCNDuplex: '"$val"'/' "$dest"
+      ;;
+    *)
+      echo "fake-lpadmin: unsupported option $key" >&2
+      exit 2
+      ;;
+  esac
+done
+exit 0
