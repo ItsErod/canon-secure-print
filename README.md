@@ -1,6 +1,6 @@
 # Remax Secure Printer
 
-Terminal installer for the RE/MAX Escarpment Canon secure queue. Agents run one command in Terminal. There is no `.app` and nothing clicks the Canon utility.
+Terminal installer for the RE/MAX Escarpment Canon secure queue. Mac agents run one command in Terminal. Windows agents run `install-windows.ps1` from an elevated PowerShell window. There is no `.app` and nothing clicks the Canon utility.
 
 After a successful install the queue matches all of these:
 
@@ -83,7 +83,7 @@ Agents do not clone the repo. `curl` fetches one file, so the repository has to 
 The public repository is [ItsErod/canon-secure-print](https://github.com/ItsErod/canon-secure-print). It must stay **public**. Private raw URLs need a token, agents will not have one, and the one-liner will fail with a 404.
 
 1. Default branch is `main`. The one-liner points at `/main/`.
-2. `install-mac.sh`, `verify-mac.sh`, and `README.md` must be on that branch. `lib/canon_ppd.pl` is the same Perl helper already embedded inside the two scripts, so a lone `curl` of `install-mac.sh` still runs.
+2. `install-mac.sh`, `verify-mac.sh`, `install-windows.ps1`, `verify-windows.ps1`, and `README.md` must be on that branch. `lib/canon_ppd.pl` is the same Perl helper already embedded inside the two Mac scripts, so a lone `curl` of `install-mac.sh` still runs. The Windows one-liner downloads `install-windows.ps1` by itself.
 3. In a browser, open `https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh`. You should see the script, starting with `#!/bin/bash`, not a GitHub HTML page and not a 404.
 4. Optional: pin a commit so a later push cannot change what agents run. Use the full commit SHA in place of `main`:
 
@@ -181,14 +181,107 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-`install-windows.ps1` is an outline only. It exits with an error and does not install a queue. Mac is the supported path.
+Windows installer **1.0.0**. It creates the same queue name and LPR target as the Mac script. Open **Windows PowerShell** with **Run as administrator**. Set `REMAX_PRINT_USER` in that elevated window. A variable set in a normal window is dropped when User Account Control starts the elevated one.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+$env:REMAX_PRINT_USER = 'tsiogase'
+$s = Join-Path $env:TEMP 'remax-install-windows.ps1'
+Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 -OutFile $s
+& $s
+```
+
+Shorter form in the same elevated window. `irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. On a failure the script throws instead of closing the window, and the report is already on screen:
+
+```powershell
+$env:REMAX_PRINT_USER = 'tsiogase'
+irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
+```
+
+`tsiogase` is the example from the October 2026 capture. Use the agent's own print username. The script prompts when `REMAX_PRINT_USER` is unset and a console is attached. It does not substitute the Windows logon name.
+
+Read-only check, from the repo or from the downloaded file:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\verify-windows.ps1
+```
+
+```powershell
+$s = Join-Path $env:TEMP 'remax-install-windows.ps1'
+Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 -OutFile $s
+powershell -NoProfile -ExecutionPolicy Bypass -File $s -Verify
+```
+
+The Windows port is a Standard TCP/IP port named `RemaxSecure_LPR`, protocol LPR, TCP port 515, queue name `RemaxSecure`, host `172.16.105.21`. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. LPR byte counting is on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place and removes a leftover queue named `RemaxSecure_COLOUR`.
+
+| Check | What the script can do |
+| --- | --- |
+| Queue, LPR port, driver | `Add-Printer` / `Add-PrinterPort`. Driver name must be Canon iR-ADV C5235/5240 PS or PS3. `Canon Generic Plus PS3` is accepted, and Device Settings **Config. Profile** must then be `iR-ADV C5235/5240`. UFR II and PCL are not used. |
+| One-sided | `Set-PrintConfiguration -DuplexingMode OneSided` |
+| Cassette Feeding Unit, Inner Finisher E1 | Set only when that driver publishes print-ticket options `OptCas2` and `IFINE1`. Otherwise the line is `MANUAL`. |
+| Enter Name | `MANUAL`. The Windows Canon PS driver does not read the Mac `*%INFO_PrPr` block, and there is no documented PrintManagement field for it. |
+
+`RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and the `MANUAL` lines are still Canon **Printer properties → Device Settings**. That is the expected first run on the fleet driver. Exit code 1 means the queue, port, or driver did not install.
+
+When the report says `MANUAL`, on the agent PC:
+
+1. **Printer properties** for **RemaxSecure**, **Device Settings**.
+2. If the driver is **Canon Generic Plus PS3**, set **Config. Profile** to **iR-ADV C5235/5240**.
+3. **Cassette Feeding Unit** = On.
+4. **Output Options** = **Inner Finisher E1**.
+5. **Set User Information** → **Settings** → **User Name** = the print username.
+6. **Default Value Settings** → **Name to Set for User Name** = that entered name. Canon documents this separately from the Windows logon name.
+7. Close Printer properties and open them again if they were already open.
+
+The script does not click the Canon utility. Do not treat a successful-looking Windows print dialog as proof that Enter Name is set. Read the **INSTALL REPORT**.
+
+If the Canon PS driver is missing, the report names what to install and lists the drivers already on the PC. Optional download, only when you host the package:
+
+```powershell
+$env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS-driver.zip'
+$env:REMAX_PRINT_USER = 'tsiogase'
+irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
+```
+
+The URL must be https and end in `.zip`, `.cab`, or `.inf` (a zip of the extracted Driver folder). A Canon setup `.exe` is not launched. If 7-Zip is installed, an `.exe` URL is unpacked and the INF inside is added with `pnputil`. There is no Canon URL built into the script. The Mac file `CNMCIRAC5235S2.ppd.gz` is not a Windows driver.
+
+Logs:
+
+| Path | What |
+| --- | --- |
+| `%TEMP%\RemaxSecurePrinterSetup-windows.log` | Full log of the last install |
+| `%TEMP%\RemaxSecurePrinterVerify-windows.log` | Last read-only verify |
+| `C:\ProgramData\RemaxSecurePrinter\` | Copy of the log, `last-install.txt`, and `requested-print-user.txt` |
+
+### Re-test on a Windows agent PC
+
+Ethan, after this is on `main`:
+
+1. On a Windows agent PC that can route to `172.16.105.21`, open elevated PowerShell.
+2. Run the one-liner above with that agent's `REMAX_PRINT_USER`.
+3. Expect **RESULT: PARTIAL**, exit code 2, and **PASS** on QUEUE, URI, DRIVER, SIDES, and STALE QUEUE when the Canon PS driver is already installed. CASSETTE, FINISHER, and ENTER NAME stay **MANUAL** unless the driver keeps `OptCas2` and `IFINE1` on the print ticket.
+4. Do the Device Settings steps in the report. Print one secure job only if you want to confirm the copier shows that Enter Name.
+5. Run `-Verify`. It does not change the queue.
+6. Run the installer a second time. It must update `RemaxSecure` and not create a second queue.
+7. Logic only, no printers: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -SelfTest`
+
+On a machine with Python 3, before pushing:
+
+```bash
+python3 tests/check-windows-installer.py
+bash tests/simulate-install.sh
+```
+
+`check-windows-installer.py` does not run PowerShell. The self-test and one real Windows PC are the checks that execute the script.
 
 ## Layout
 
 | File | Role |
 | --- | --- |
-| `install-mac.sh` | Installer agents run |
-| `verify-mac.sh` | Read-only check for IT |
-| `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two scripts) |
-| `install-windows.ps1` | Not implemented |
-| `tests/simulate-install.sh` | Fake-CUPS test of the install and verify flow |
+| `install-mac.sh` | Installer Mac agents run |
+| `verify-mac.sh` | Read-only check for a Mac |
+| `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
+| `install-windows.ps1` | Windows installer 1.0.0 (`-Verify`, `-SelfTest`) |
+| `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
+| `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
+| `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |
