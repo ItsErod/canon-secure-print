@@ -26,6 +26,8 @@ curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/ins
 
 Terminal asks for the Mac admin password, then asks for the print username (the name that should appear on the copier). Progress is printed in the window. The script ends with an **INSTALL REPORT**. Every required line must say `PASS`. If any line says `FAIL`, the script exits non-zero.
 
+If `CNMCIRAC5235S2.ppd.gz` is already on the Mac, the command does not download a driver. If it is missing, the same command installs the Canon iR-ADV C5235/5240 PS package, checks that the PPD appeared, then creates `RemaxSecure`.
+
 To set the username in the command and skip the prompt, put the variable on `sudo`. A normal `export` is dropped by `sudo`:
 
 ```bash
@@ -105,6 +107,28 @@ On a Mac, this checks the encoder without touching printers:
 bash install-mac.sh --self-test
 ```
 
+### Re-test the one-liner
+
+On a Mac that already has the driver, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh | sudo REMAX_PRINT_USER='tsiogase' bash
+```
+
+The log should say the Canon driver is already installed. It should not download a package. The report should be `RESULT: PASS`.
+
+On a Mac without `CNMCIRAC5235S2.ppd.gz`, run the same command (installer 1.1.0 or later). The log should say the driver is not installed, download the Canon zip, install `Canon_PS_Installer.pkg`, re-check `CNMCIRAC5235S2.ppd.gz`, then create `RemaxSecure` and end with `RESULT: PASS`.
+
+Until this version is on `main`, replace `main` with the commit SHA. The publish section above explains that pin.
+
+Without a Mac:
+
+```bash
+bash tests/simulate-install.sh
+```
+
+That covers the missing-driver path with a fake package in the same zip → disk image → nested disk image → `Canon_PS_Installer.pkg` shape. It does not download from Canon.
+
 ## If the Canon driver is not installed
 
 The usual fleet Mac already has the driver. The installer looks for:
@@ -113,17 +137,23 @@ The usual fleet Mac already has the driver. The installer looks for:
 /Library/Printers/PPDs/Contents/Resources/CNMCIRAC5235S2.ppd.gz
 ```
 
-or the same file without `.gz`. If NickName and ModelName both contain `C5235` and `5240`, it uses that PPD and does not install a package. A "Japanese Paper" media type inside the PPD is normal and is not treated as the wrong driver.
+or the same file without `.gz`. If that file is present and NickName and ModelName both contain `C5235` and `5240`, the script uses it and does not download anything. A "Japanese Paper" media type inside the PPD is normal and is not treated as the wrong driver.
 
-If the file is missing, the script prints where it should be and exits. It does not download Canon software unless you set a URL:
+If the file is missing, the same one-liner downloads and installs the Canon PS driver, checks that `CNMCIRAC5235S2.ppd.gz` (or `.ppd`) is now on disk, then creates `RemaxSecure`.
+
+Default package (override with `REMAX_CANON_PKG_URL`):
+
+```text
+https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip
+```
+
+That zip contains `PS_v4.17.22_mac.dmg`, which contains `mac-ps-v41722-00.dmg`, which contains `Canon_PS_Installer.pkg` (Canon iR-ADV C5235/5240 PS, model `CNMCIRAC5235S2`). The script runs `installer -pkg … -target /` as root. A flat `.pkg`, a `.dmg` that contains a `.pkg`, or a `.zip` that contains either, are all accepted. When several packages are present, a PS package is chosen over a UFR package. `REMAX_CANON_PKG_URL` replaces the default for one run. Export `CANON_PKG_URL_DEFAULT` (or edit that assignment in `install-mac.sh`) to change the built-in URL. The Canon package is not stored in this repo.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh | sudo \
   REMAX_CANON_PKG_URL='https://your-host.example/Canon-iR-ADV-C5235-PS.pkg' \
   REMAX_PRINT_USER='tsiogase' bash
 ```
-
-The URL may be a flat `.pkg`, a `.dmg` that contains a `.pkg`, or a `.zip` that contains a `.pkg`. There is no URL built into the script.
 
 ## Logs
 
@@ -165,7 +195,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Troubleshooting
 
-**The report says the driver is missing.** Install the Canon iR-ADV C5235/5240 PS package that is already on the rest of the fleet, or set `REMAX_CANON_PKG_URL`. Then run the one-liner again.
+**The report says the driver is missing.** The installer tried the Canon iR-ADV C5235/5240 PS package (`Canon_PS_Installer.pkg` from `PS_v4.17.22_mac.zip`) and `CNMCIRAC5235S2.ppd.gz` is still absent. Read the log for the download or `installer` error. Point `REMAX_CANON_PKG_URL` at another `.pkg`, `.dmg`, or `.zip` and run the one-liner again.
 
 **`sudo` did not see `REMAX_PRINT_USER`.** Write `sudo REMAX_PRINT_USER='name' bash`, not `REMAX_PRINT_USER='name' sudo bash`.
 
