@@ -16,7 +16,7 @@ fi
 set -u
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 RAW_VERIFY_URL="https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/verify-mac.sh"
 QUEUE="RemaxSecure"
 STALE_QUEUE="RemaxSecure_COLOUR"
@@ -706,7 +706,10 @@ END_CANON_PPD
 
 canon_ppd() {
   local src lib
-  src="${BASH_SOURCE[0]}"
+  # macOS bash 3.2 leaves BASH_SOURCE unset when this script is piped
+  # (curl | bash). A bare ${BASH_SOURCE[0]} under set -u aborts the shell
+  # even inside `if`, so the verifier would exit before the VERIFY REPORT.
+  src="${BASH_SOURCE[0]-}"
   if [[ -n "$src" && "$src" != "bash" && "$src" != "main" && "$src" != "-" && -f "$src" ]]; then
     lib="$(cd "$(dirname "$src")" && pwd)/lib/canon_ppd.pl"
     if [[ -f "$lib" ]]; then

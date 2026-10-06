@@ -9,7 +9,16 @@ cd "$ROOT"
 bash -n install-mac.sh
 bash -n verify-mac.sh
 python3 tests/sync-embed.py --check
+perl -c lib/canon_ppd.pl >/dev/null
 perl lib/canon_ppd.pl self-test >/dev/null
+
+# macOS /bin/bash is 3.2. `curl | sudo bash` leaves BASH_SOURCE unset, and
+# set -u then aborts on ${BASH_SOURCE[0]} before lpadmin. The default form
+# ${BASH_SOURCE[0]-} is required. A bare expansion must not come back.
+if grep -n 'src="${BASH_SOURCE\[0\]}"' install-mac.sh verify-mac.sh >/dev/null; then
+  echo "BASH_SOURCE[0] is expanded without a default; a piped bash 3.2 installer aborts under set -u" >&2
+  exit 1
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/remax-sim.XXXXXX")"
 cleanup() { rm -rf "$work"; }
@@ -124,6 +133,14 @@ assert_installed
 grep -q 'Enter Name should show tsiogase' "$work/stdout.txt"
 [[ -f "$support/last-install.txt" ]]
 grep -q '^result=PASS$' "$support/last-install.txt"
+grep -q 'installer 1.0.1' "$work/stdout.txt"
+
+echo "=== install via stdin pipe (curl | sudo bash layout) ==="
+export REMAX_LOG="$work/install-stdin.log"
+cat "$isolated/install-mac.sh" | bash >"$work/stdout.txt"
+assert_report "$work/stdout.txt"
+assert_installed
+grep -q 'installer 1.0.1' "$work/stdout.txt"
 
 echo "=== verify ==="
 export REMAX_LOG="$work/verify.log"
