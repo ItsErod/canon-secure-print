@@ -1,6 +1,6 @@
 # Remax Secure Printer
 
-Terminal installer for the RE/MAX Escarpment Canon secure queue. Mac agents run one command in Terminal. Windows agents run `install-windows.ps1` from an elevated PowerShell window. There is no `.app` and nothing clicks the Canon utility.
+Terminal installer for the RE/MAX Escarpment Canon secure queue. Mac agents run one command in Terminal. Windows agents run one command in an elevated PowerShell window, type their print username, and the queue is installed. There is no `.app`. The Mac installer does not click the Canon utility. The Windows installer opens Printer properties and sets Device Settings.
 
 After a successful install the queue matches all of these:
 
@@ -211,24 +211,31 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.0.0**. It creates the same queue name and LPR target as the Mac script. Open **Windows PowerShell** with **Run as administrator**. Set `REMAX_PRINT_USER` in that elevated window. A variable set in a normal window is dropped when User Account Control starts the elevated one.
+Windows installer **1.1.0**. It creates the same queue name and LPR target as the Mac script, then sets Device Settings. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-$env:REMAX_PRINT_USER = 'tsiogase'
-$s = Join-Path $env:TEMP 'remax-install-windows.ps1'
-Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 -OutFile $s
-& $s
+irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
 ```
 
-Shorter form in the same elevated window. `irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. On a failure the script throws instead of closing the window, and the report is already on screen:
+`irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. The window asks for the print username (the name on the copier, not the Windows logon). Leave the Printer properties window alone while it is open. The script closes it. The report is **INSTALL REPORT**.
+
+To skip the prompt, set the name in that same elevated window. A variable set in a normal window is dropped when User Account Control starts the elevated one:
 
 ```powershell
 $env:REMAX_PRINT_USER = 'tsiogase'
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
 ```
 
-`tsiogase` is the example from the October 2026 capture. Use the agent's own print username. The script prompts when `REMAX_PRINT_USER` is unset and a console is attached. It does not substitute the Windows logon name.
+`tsiogase` is the example from the October 2026 capture. Use the agent's own print username. The script does not substitute the Windows logon name.
+
+Review the file before running it, if you want to:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+$s = Join-Path $env:TEMP 'remax-install-windows.ps1'
+Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 -OutFile $s
+& $s
+```
 
 Read-only check, from the repo or from the downloaded file:
 
@@ -246,14 +253,18 @@ The Windows port is a Standard TCP/IP port named `RemaxSecure_LPR`, protocol LPR
 
 | Check | What the script can do |
 | --- | --- |
-| Queue, LPR port, driver | `Add-Printer` / `Add-PrinterPort`. Driver name must be Canon iR-ADV C5235/5240 PS or PS3. `Canon Generic Plus PS3` is accepted, and Device Settings **Config. Profile** must then be `iR-ADV C5235/5240`. UFR II and PCL are not used. |
-| One-sided | `Set-PrintConfiguration -DuplexingMode OneSided` |
-| Cassette Feeding Unit, Inner Finisher E1 | Set only when that driver publishes print-ticket options `OptCas2` and `IFINE1`. Otherwise the line is `MANUAL`. |
-| Enter Name | `MANUAL`. The Windows Canon PS driver does not read the Mac `*%INFO_PrPr` block, and there is no documented PrintManagement field for it. |
+| Queue, LPR port, driver | `Add-Printer` / `Add-PrinterPort`. Driver name must be Canon iR-ADV C5235/5240 PS or PS3. `Canon Generic Plus PS3` is accepted. UFR II and PCL are not used. |
+| One-sided | `Set-PrintConfiguration -DuplexingMode OneSided`, including again after Device Settings. |
+| Cassette Feeding Unit | Print ticket `OptCas2` when the driver publishes it. Otherwise Printer properties, Device Settings, **Cassette Feeding Unit** = On. `PASS` only after readback. |
+| Inner Finisher E1 | Print ticket `IFINE1` when the driver publishes it. Otherwise **Output Options** = **Inner Finisher E1**. `PASS` only after readback. |
+| Enter Name | **Set User Information** → **Settings** → **User Name** = the print username, and **Default Value Settings** → **Name to Set for User Name** = that entered name (Enter Name, not Logon name). The Windows driver does not read the Mac `*%INFO_PrPr` block. `PASS` only after both controls read back. |
+| Config. Profile | Set only when that combo is on the page. The model-specific driver in the fleet screenshot does not have it. For **Canon Generic Plus PS3**, it must be **iR-ADV C5235/5240**. |
 
-`RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and the `MANUAL` lines are still Canon **Printer properties → Device Settings**. That is the expected first run on the fleet driver. Exit code 1 means the queue, port, or driver did not install.
+`RESULT: PASS` and exit code 0 mean every line passed, including Device Settings readback. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. Exit code 2 does not throw when the script is run with `irm | iex`. Exit code 1 means the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong.
 
-When the report says `MANUAL`, on the agent PC:
+`-Verify` opens Printer properties, reads Device Settings, and clicks Cancel. It does not save changes. `REMAX_DEVICE_UI=0` skips that dialog.
+
+When the report says `MANUAL`, automation did not see the control or the readback did not match. On the agent PC:
 
 1. **Printer properties** for **RemaxSecure**, **Device Settings**.
 2. If the driver is **Canon Generic Plus PS3**, set **Config. Profile** to **iR-ADV C5235/5240**.
@@ -263,7 +274,24 @@ When the report says `MANUAL`, on the agent PC:
 6. **Default Value Settings** → **Name to Set for User Name** = that entered name. Canon documents this separately from the Windows logon name.
 7. Close Printer properties and open them again if they were already open.
 
-The script does not click the Canon utility. Do not treat a successful-looking Windows print dialog as proof that Enter Name is set. Read the **INSTALL REPORT**.
+A secure-print PIN is not set. Do not treat a Windows print dialog as proof that Enter Name is set. Read the **INSTALL REPORT**.
+
+The print-ticket path is tried first. On the fleet driver, PrintManagement does not publish `OptCas2` or `IFINE1`, so cassette, finisher, and Enter Name are set through the Device Settings dialog shown after installer 1.0.0 (Cassette unchecked, Output Options = None, Set User Information checked). `PASS` requires the same dialog to read back On, Inner Finisher E1, the print username, and an Enter Name mode. Logon name, Computer name, and User Account Name do not count.
+
+No Canon registry value is invented. Optional, if a later driver build does not expose those controls: on one reference PC, set Cassette and Inner Finisher E1 by hand, then capture printer-specific data and the global DEVMODE. Microsoft documents `d` as printer-specific data and `g` as the global DEVMODE. Do not add `2`. That flag also stores the port and the share.
+
+```powershell
+rundll32 printui.dll,PrintUIEntry /Ss /n "RemaxSecure" /a "$env:ProgramData\RemaxSecurePrinter\device-settings.dat" d g
+```
+
+On later PCs, point the installer at that file. Enter Name is still filled from the username typed in that run, because a shared file would contain one person's name. The dialog still runs and is what the report trusts.
+
+```powershell
+$env:REMAX_DEVICE_DAT = "$env:ProgramData\RemaxSecurePrinter\device-settings.dat"
+irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
+```
+
+This file is not in the repo. Agents do not need it when the Device Settings dialog matches the fleet screenshot.
 
 If the Canon PS driver is missing, the report names what to install and lists the drivers already on the PC. Optional download, only when you host the package:
 
@@ -289,9 +317,9 @@ Ethan, after this is on `main`:
 
 1. On a Windows agent PC that can route to `172.16.105.21`, open elevated PowerShell.
 2. Run the one-liner above with that agent's `REMAX_PRINT_USER`.
-3. Expect **RESULT: PARTIAL**, exit code 2, and **PASS** on QUEUE, URI, DRIVER, SIDES, and STALE QUEUE when the Canon PS driver is already installed. CASSETTE, FINISHER, and ENTER NAME stay **MANUAL** unless the driver keeps `OptCas2` and `IFINE1` on the print ticket.
-4. Do the Device Settings steps in the report. Print one secure job only if you want to confirm the copier shows that Enter Name.
-5. Run `-Verify`. It does not change the queue.
+3. Expect **RESULT: PASS** when the Canon PS driver is already installed and the Device Settings dialog matches the fleet screenshot. **RESULT: PARTIAL**, exit code 2, means the queue is in place and a Device Settings line could not be verified. Do those steps from the report, then run the installer again.
+4. Print one secure job only if you want to confirm the copier shows that Enter Name.
+5. Run `-Verify`. It reads Device Settings and clicks Cancel. It does not change the queue. `FAIL` on CASSETTE, FINISHER, or ENTER NAME means the value was read and is wrong.
 6. Run the installer a second time. It must update `RemaxSecure` and not create a second queue.
 7. Logic only, no printers: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -SelfTest`
 
@@ -311,7 +339,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.0.0 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.1.0 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

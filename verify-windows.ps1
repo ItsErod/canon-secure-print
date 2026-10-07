@@ -26,8 +26,8 @@ From PowerShell, download the installer and pass -Verify:
   powershell -NoProfile -ExecutionPolicy Bypass -File $s -Verify
 
 Optional: $env:REMAX_PRINT_USER = 'tsiogase' before that command.
-The name is only included in the MANUAL Enter Name line. The Windows driver
-value is not read from PrintManagement.
+Verify opens Printer properties, reads Device Settings, and clicks Cancel.
+PASS on Enter Name means User Name and Name to Set for User Name were read back.
 '@
     if ($PSCommandPath) { exit 1 }
     throw 'verify-windows.ps1 could not find install-windows.ps1'

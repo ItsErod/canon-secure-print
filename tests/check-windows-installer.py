@@ -106,7 +106,17 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.0.0",
+        "1.1.0",
+        "PrintUIEntry",
+        "UIAutomationClient",
+        "REMAX_DEVICE_DAT",
+        "REMAX_DEVICE_UI",
+        "Default Value Settings",
+        "Name to Set for User Name",
+        "Find-CanonDeviceTargets",
+        "Resolve-NameToSetLabel",
+        "Invoke-CanonDeviceAutomation",
+        "Read-PrintUserPrompt",
         "RemaxSecure",
         "RemaxSecure_COLOUR",
         "RemaxSecure_LPR",
@@ -169,6 +179,14 @@ def main() -> int:
         fail("README lost the Mac one-liner")
     if "REMAX_PRINT_USER='tsiogase' bash" not in readme:
         fail("README lost the Mac REMAX_PRINT_USER one-liner")
+    bare = "irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex"
+    if bare not in readme:
+        fail("README is missing the prompt-style Windows one-liner")
+    complete = installer.split("function Invoke-Complete", 1)[1].split("function ", 1)[0]
+    partial_at = complete.find("Code -eq 2")
+    throw_at = complete.find("throw ")
+    if partial_at < 0 or throw_at < 0 or partial_at > throw_at:
+        fail("exit code 2 must be handled before the terminating throw")
     print("check-windows-installer: PASS")
     return 0
 
