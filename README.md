@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.0**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.1**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -249,7 +249,7 @@ Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/m
 powershell -NoProfile -ExecutionPolicy Bypass -File $s -Verify
 ```
 
-The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host address), protocol LPR, TCP port 515, queue name `RemaxSecure`, LPR byte counting on, SNMP off. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. The recorded check is `Add-PrinterPort -Name 172.16.105.21 -LprHostAddress 172.16.105.21 -LprQueueName RemaxSecure -LprByteCounting`, then SNMP disabled. Readback uses `Get-PrinterPort` and the port monitor key `HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\172.16.105.21` (`Protocol=2`, `Queue=RemaxSecure`, `Byte Count=1`, `SNMP Enabled=0`). Installer 1.1.0 used a port named `RemaxSecure_LPR`. Re-running 1.2.0 moves `RemaxSecure` onto the host-named port and removes `RemaxSecure_LPR` when no other queue uses it. LPR byte counting stays on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place, leaves it not shared and not the default, and removes a leftover queue named `RemaxSecure_COLOUR`.
+The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host address), protocol LPR, TCP port 515, queue name `RemaxSecure`, LPR byte counting on, SNMP off. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. The recorded check is `Add-PrinterPort -Name 172.16.105.21 -LprHostAddress 172.16.105.21 -LprQueueName RemaxSecure -LprByteCounting`, then SNMP disabled. Readback uses `Get-PrinterPort` and the port monitor key `HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\172.16.105.21` (`Protocol=2`, `Queue=RemaxSecure`, `Byte Count=1`, `SNMP Enabled=0`). Installer 1.1.0 used a port named `RemaxSecure_LPR`. Re-running this installer moves `RemaxSecure` onto the host-named port and removes `RemaxSecure_LPR` when no other queue uses it. LPR byte counting stays on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place, leaves it not shared and not the default, and removes a leftover queue named `RemaxSecure_COLOUR`.
 
 | Check | What the script can do |
 | --- | --- |
@@ -262,7 +262,7 @@ The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host addre
 | Set User Information | Checkbox **Set User Information** on. **Get Device Information** is left alone. |
 | User Name | **Settings...** on that row opens **Default Value Settings**. Under **Name to Set for User Information:**, the **User Name** radio (not **Logon Name**) and the text box under it. **Always Confirm User Information When Performing Secured Print** stays checked. **Confirm User Name When Printing** stays unchecked. PIN stays blank. |
 
-`RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. Exit code 2 does not throw when the script is run with `irm | iex`. Exit code 1 means the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong.
+`RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. `RESULT: FAIL` and exit code 1 mean the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong. When the script is run with `irm | iex`, exit code 1 and exit code 2 do not throw. The report is printed, `LASTEXITCODE` is set, and the window stays open.
 
 `-Verify` reads printer properties, then opens Printer properties, reads Device Settings, and clicks Cancel. It does not save changes. `REMAX_DEVICE_UI=0` skips that dialog. The property read still runs.
 
@@ -306,9 +306,19 @@ irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-wi
 
 This file is not in the repo. Agents do not need it when the Device Settings dialog matches the recorded Windows 11 setup.
 
-The recorded package is Canon PS3 Printer Driver Ver. 30.00, file `PS_Driver_V3000_32_64_EN_05.exe`, x64 folder, Setup.exe file version 30.0.0.1. Canon hosts it behind a click-through on the imageRUNNER ADVANCE C5235 support page, so this script has no built-in download URL. The download mechanism is unchanged: set `REMAX_CANON_PKG_URL` when you host the package. An x64 INF is preferred over an x86 INF in the same package.
+If `Canon iR-ADV C5235/5240 PS3` is not already installed, the same one-liner downloads the public release asset and checks it before install:
 
-If the Canon PS3 driver is missing, the report names what to install and lists the drivers already on the PC. Optional download, only when you host the package:
+```text
+https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip
+SHA256 4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da
+26722033 bytes
+```
+
+The download uses `Invoke-WebRequest -UseBasicParsing` with TLS 1.2 and follows the GitHub 302 redirect. A size or SHA256 mismatch stops the install and names both the value received and the value expected. The zip is not executed. `pnputil /add-driver` installs `x64/Driver/CNS30UA64.INF` (not `x64/misc/NullDriver/lasernull.inf`), then `Add-PrinterDriver -Name 'Canon iR-ADV C5235/5240 PS3'`.
+
+`REMAX_CANON_PKG_URL` replaces that URL for one run. A different URL is not checked against this SHA256.
+
+If the Canon PS3 driver is still missing after that download, the report names the failure and lists the drivers already on the PC. Optional package, only when you host a different one:
 
 ```powershell
 $env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS-driver.zip'
@@ -354,7 +364,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.0 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.1 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

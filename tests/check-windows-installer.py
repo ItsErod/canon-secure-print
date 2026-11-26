@@ -106,7 +106,15 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.0",
+        "1.2.1",
+        "https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip",
+        "4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da",
+        "CNS30UA64.INF",
+        "UseBasicParsing",
+        "Tls12",
+        "MaximumRedirection",
+        "LASTEXITCODE",
+        "Get-IexFinishMessage",
         "PrintUIEntry",
         "UIAutomationClient",
         "REMAX_DEVICE_DAT",
@@ -210,10 +218,17 @@ def main() -> int:
     if bare not in readme:
         fail("README is missing the prompt-style Windows one-liner")
     complete = installer.split("function Invoke-Complete", 1)[1].split("function ", 1)[0]
-    partial_at = complete.find("Code -eq 2")
-    throw_at = complete.find("throw ")
-    if partial_at < 0 or throw_at < 0 or partial_at > throw_at:
-        fail("exit code 2 must be handled before the terminating throw")
+    if "throw " in complete:
+        fail("Invoke-Complete must not throw when the script is run with irm | iex")
+    if "LASTEXITCODE" not in complete:
+        fail("Invoke-Complete must set LASTEXITCODE")
+    if "Get-IexFinishMessage" not in complete:
+        fail("Invoke-Complete must print the non-throwing finish message")
+    release = "https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip"
+    if release not in readme:
+        fail("README is missing the built-in Canon driver release URL")
+    if "4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da" not in readme:
+        fail("README is missing the Canon driver SHA256")
     print("check-windows-installer: PASS")
     return 0
 

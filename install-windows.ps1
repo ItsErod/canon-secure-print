@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.0
+# Remax Secure Printer - Windows installer 1.2.1
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -39,8 +39,12 @@
 #             Older installs used port RemaxSecure_LPR. The queue is moved
 #             onto the host-named port.
 #   Driver:   Canon iR-ADV C5235/5240 PS3, Canon PS3 Printer Driver Ver. 30.00,
-#             x64 (Setup.exe file version 30.0.0.1). Canon Driver Information
-#             Assist Service is not required.
+#             x64 (Setup.exe file version 30.0.0.1). If that driver is missing,
+#             the script downloads Canon-PS3-v30.00-x64.zip from the public
+#             GitHub release, checks SHA256, and installs x64/Driver/CNS30UA64.INF
+#             with pnputil /add-driver and Add-PrinterDriver. REMAX_CANON_PKG_URL
+#             replaces that URL. Canon Driver Information Assist Service is not
+#             required.
 #   Sides:    Set-PrintConfiguration -DuplexingMode OneSided (1-sided Printing).
 #   Device Settings, tried first through Get-PrinterProperty / Set-PrinterProperty
 #   when the driver publishes a matching Config:* property and the readback
@@ -62,7 +66,11 @@
 #   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
 #   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.2.0'
+$script:Version = '1.2.1'
+$script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
+$script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
+$script:CanonPkgBytes = 26722033
+$script:CanonInfLeaf = 'CNS30UA64.INF'
 $script:RawUrl = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1'
 $script:PrinterName = 'RemaxSecure'
 $script:StaleName = 'RemaxSecure_COLOUR'
@@ -138,6 +146,7 @@ function Test-WindowsHost {
 function Invoke-Complete {
     param([int]$Code)
     $global:RemaxExitCode = $Code
+    $global:LASTEXITCODE = $Code
     if (-not $script:RanAsFile) {
         $ErrorActionPreference = $script:PreviousErrorAction
     }
@@ -147,13 +156,17 @@ function Invoke-Complete {
     }
     $script:Completing = $true
     if ($script:RanAsFile) { exit $Code }
+    $finish = Get-IexFinishMessage $Code
+    if ($finish) { Write-RemaxLine $finish }
+}
+
+function Get-IexFinishMessage {
+    param([int]$Code)
+    if ($Code -eq 0) { return '' }
     if ($Code -eq 2) {
-        Write-RemaxLine "Exit code 2 (RESULT PARTIAL). MANUAL lines were not verified. The queue install is not a failure, and this window stays open."
-        return
+        return 'Exit code 2 (RESULT PARTIAL). MANUAL lines were not verified. The queue install is not a failure, and this window stays open.'
     }
-    if ($Code -ne 0) {
-        throw "Remax Secure Printer finished with exit code $Code."
-    }
+    return 'Exit code 1 (RESULT FAIL). The report above is the result. This window stays open.'
 }
 
 function Show-Usage {
@@ -172,8 +185,9 @@ Environment (set them in the elevated PowerShell window):
   REMAX_PRINT_USER       Print username (last name + first initial, lowercase,
                          for example tsiogase). Prompted when unset.
   REMAX_CANON_PKG_URL    Optional https URL of a .zip, .cab, or .inf driver.
-                         A Canon setup .exe is not launched. Prefer the
-                         x64 folder of Canon PS3 Printer Driver Ver. 30.00.
+                         When unset, the built-in Canon-PS3-v30.00-x64.zip
+                         release is downloaded and its SHA256 is checked.
+                         A Canon setup .exe is not launched.
   REMAX_PRINTER_URI      Default lpd://172.16.105.21/RemaxSecure
                          The Standard TCP/IP port is named after the host.
   REMAX_LPR_BYTE_COUNT   Default on. Set to 0 to disable LPR byte counting.
@@ -183,7 +197,8 @@ Environment (set them in the elevated PowerShell window):
                          before Device Settings automation.
 
 Exit codes: 0 every line PASS, 2 queue installed and MANUAL lines remain, 1 failed.
-Exit code 2 does not throw when the script is run with irm | iex.
+Exit code 1 and exit code 2 do not throw when the script is run with irm | iex.
+LASTEXITCODE is set to that code and the window stays open.
 "@
 }
 
@@ -901,12 +916,114 @@ function Find-SelectedInstalledDriver {
     return $null
 }
 
+function Get-CanonInfPickScore {
+    param([string]$Path, [string]$Model)
+    $rank = Get-DriverRank $Model
+    if ($rank -lt 1) { return -1 }
+    $norm = ''
+    if ($Path) { $norm = $Path.Replace('/', '\') }
+    if ($norm -match '(?i)NullDriver|lasernull') { return -1 }
+    $score = ($rank * 1000) + (Get-InfArchitectureScore $Path)
+    $leaf = [string]$Path
+    $slash = $leaf.LastIndexOf('\')
+    $fwd = $leaf.LastIndexOf('/')
+    $cut = $slash
+    if ($fwd -gt $cut) { $cut = $fwd }
+    if ($cut -ge 0 -and $cut -lt ($leaf.Length - 1)) {
+        $leaf = $leaf.Substring($cut + 1)
+    }
+    if ($leaf -and ($leaf.ToLowerInvariant() -eq $script:CanonInfLeaf.ToLowerInvariant())) {
+        $score = $score + 500
+    }
+    return $score
+}
+
+function Format-Sha256Bytes {
+    param([byte[]]$Bytes)
+    $builder = New-Object System.Text.StringBuilder
+    foreach ($b in @($Bytes)) {
+        [void]$builder.Append($b.ToString('x2'))
+    }
+    return $builder.ToString()
+}
+
+function Get-BytesSha256 {
+    param([byte[]]$Data)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return (Format-Sha256Bytes ($sha.ComputeHash($Data)))
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-FileSha256 {
+    param([string]$Path)
+    $sha = $null
+    $stream = $null
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        return (Format-Sha256Bytes ($sha.ComputeHash($stream)))
+    } finally {
+        if ($stream) { $stream.Dispose() }
+        if ($sha) { $sha.Dispose() }
+    }
+}
+
+function Resolve-CanonPackageUrl {
+    if (-not [string]::IsNullOrWhiteSpace($env:REMAX_CANON_PKG_URL)) {
+        return $env:REMAX_CANON_PKG_URL.Trim()
+    }
+    return $script:CanonPkgUrl
+}
+
+function Test-PinnedCanonDownload {
+    param([string]$Url, [string]$Hash, [long]$Length)
+    if ($Url -ne $script:CanonPkgUrl) {
+        return @{
+            Ok     = $true
+            Pinned = $false
+            Detail = 'REMAX_CANON_PKG_URL is not the built-in package, so the pinned SHA256 is not applied.'
+        }
+    }
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ($Length -ne [long]$script:CanonPkgBytes) {
+        [void]$problems.Add("size " + $Length + " (expected " + $script:CanonPkgBytes + ")")
+    }
+    $got = ''
+    if ($Hash) { $got = $Hash.Trim().ToLowerInvariant() }
+    if ($got -ne $script:CanonPkgSha256) {
+        [void]$problems.Add("SHA256 " + $got + " (expected " + $script:CanonPkgSha256 + ")")
+    }
+    if ($problems.Count -gt 0) {
+        $detail = "Canon driver download failed verification for " + $Url + ". " + ($problems -join '. ') + ". The file was not installed."
+        return @{ Ok = $false; Pinned = $true; Detail = $detail }
+    }
+    return @{ Ok = $true; Pinned = $true; Detail = ("SHA256 " + $script:CanonPkgSha256) }
+}
+
+function Save-RemaxDownload {
+    param([string]$Url, [string]$Destination)
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch {
+    }
+    $previousProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 5
+    } finally {
+        $ProgressPreference = $previousProgress
+    }
+}
+
 function Install-DriverFromInf {
     param(
         [string]$InfPath,
         [string]$Model
     )
-    Write-Remax ("Adding driver package " + $InfPath)
+    Write-Remax ("pnputil /add-driver " + $InfPath + " /install")
     & pnputil.exe /add-driver $InfPath /install
     if ($LASTEXITCODE -ne 0) {
         Write-Remax ("pnputil /add-driver exited " + $LASTEXITCODE + ". Trying pnputil -i -a.")
@@ -916,6 +1033,7 @@ function Install-DriverFromInf {
         }
     }
     try {
+        Write-Remax ("Add-PrinterDriver -Name '" + $Model + "' -InfPath '" + $InfPath + "'")
         Add-PrinterDriver -Name $Model -InfPath $InfPath
         Write-Remax ("Registered printer driver " + $Model)
     } catch {
@@ -947,12 +1065,8 @@ function Install-CanonPackageFromUrl {
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     try {
         $download = Join-Path $work 'download.bin'
-        Write-Remax ("Downloading Canon driver description from " + $Url)
-        try {
-            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        } catch {
-        }
-        Invoke-WebRequest -Uri $Url -OutFile $download -UseBasicParsing
+        Write-Remax ("Downloading Canon driver package from " + $Url)
+        Save-RemaxDownload -Url $Url -Destination $download
         $length = (Get-Item -LiteralPath $download).Length
         if ($length -gt 250MB) {
             throw "Downloaded file is larger than 250 MB. Refusing to continue."
@@ -960,6 +1074,12 @@ function Install-CanonPackageFromUrl {
         if ($length -lt 64) {
             throw "Downloaded file is too small to be a Canon driver package."
         }
+        $hash = Get-FileSha256 $download
+        $check = Test-PinnedCanonDownload -Url $Url -Hash $hash -Length ([long]$length)
+        if (-not $check.Ok) {
+            throw [string]$check.Detail
+        }
+        Write-Remax ([string]$check.Detail)
         $extract = Join-Path $work 'extract'
         New-Item -ItemType Directory -Path $extract -Force | Out-Null
         if ($kind -eq 'inf') {
@@ -996,21 +1116,15 @@ function Install-CanonPackageFromUrl {
         }
         $bestInf = $null
         $bestModel = $null
-        $bestRank = 0
-        $bestPathScore = -1
+        $bestScore = -1
         $arch = Get-DriverArchitecture
         foreach ($inf in @(Get-ChildItem -LiteralPath $extract -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)) {
             $models = @(Get-InfDriverModels -Text (Read-AllText $inf.FullName) -Architecture $arch)
             $choice = Select-BestDriverName -Names $models
-            $rank = Get-DriverRank $choice
-            $pathScore = Get-InfArchitectureScore $inf.FullName
-            Write-Remax ("INF " + $inf.FullName + " selected model '" + $choice + "' rank " + $rank + " path " + $pathScore)
-            $better = $false
-            if ($rank -gt $bestRank) { $better = $true }
-            elseif ($rank -eq $bestRank -and $rank -gt 0 -and $pathScore -gt $bestPathScore) { $better = $true }
-            if ($better) {
-                $bestRank = $rank
-                $bestPathScore = $pathScore
+            $score = Get-CanonInfPickScore -Path $inf.FullName -Model $choice
+            Write-Remax ("INF " + $inf.FullName + " selected model '" + $choice + "' score " + $score)
+            if ($score -gt $bestScore) {
+                $bestScore = $score
                 $bestInf = $inf.FullName
                 $bestModel = $choice
             }
@@ -1034,23 +1148,18 @@ function Search-DriverStore {
     $arch = Get-DriverArchitecture
     $bestInf = $null
     $bestModel = $null
-    $bestRank = 0
-    $bestPathScore = -1
+    $bestScore = -1
     foreach ($dir in $dirs) {
         foreach ($inf in @(Get-ChildItem -LiteralPath $dir.FullName -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)) {
             $text = ''
             try { $text = Read-AllText $inf.FullName } catch { continue }
             if ($text -notmatch 'C5235' -and $text -notmatch 'Generic Plus PS3') { continue }
+            if ($inf.FullName -match '(?i)NullDriver|lasernull') { continue }
             $models = @(Get-InfDriverModels -Text $text -Architecture $arch)
             $choice = Select-BestDriverName -Names $models
-            $rank = Get-DriverRank $choice
-            $pathScore = Get-InfArchitectureScore $inf.FullName
-            $better = $false
-            if ($rank -gt $bestRank) { $better = $true }
-            elseif ($rank -eq $bestRank -and $rank -gt 0 -and $pathScore -gt $bestPathScore) { $better = $true }
-            if ($better) {
-                $bestRank = $rank
-                $bestPathScore = $pathScore
+            $score = Get-CanonInfPickScore -Path $inf.FullName -Model $choice
+            if ($score -gt $bestScore) {
+                $bestScore = $score
                 $bestInf = $inf.FullName
                 $bestModel = $choice
             }
@@ -1075,23 +1184,26 @@ function Show-MissingDriverHelp {
     }
     Write-RemaxLine @"
 
-Install Canon PS3 Printer Driver Ver. $script:DriverPackageVersion (x64).
-The recorded package is PS_Driver_V3000_32_64_EN_05.exe. Setup.exe in the
-x64 folder has file version $script:DriverFileVersion. The driver name after
-install is $script:ExactDriverName.
-Canon publishes that package on the imageRUNNER ADVANCE C5235 support page.
-The download is a click-through, so this script has no built-in URL.
+The installer already tried the built-in package when REMAX_CANON_PKG_URL
+was not set:
+
+  $script:CanonPkgUrl
+  SHA256 $script:CanonPkgSha256
+  $script:CanonPkgBytes bytes
+
+That zip's printer driver is x64\Driver\$script:CanonInfLeaf. It is installed
+with pnputil /add-driver and Add-PrinterDriver -Name '$script:ExactDriverName'.
+The zip also contains x64\misc\NullDriver\lasernull.inf. That USB null driver
+is not installed.
 Canon Driver Information Assist Service is not required. If the package
 installs it, that is fine. This script does not start or install that service.
 Do not use the UFR II or PCL driver for this queue.
 The Mac PPD CNMCIRAC5235S2.ppd.gz is not a Windows driver package.
-A different Canon PS name can still create the queue, and the report marks
-DRIVER as MANUAL until the name is exactly $script:ExactDriverName.
 
-To install from a package you host, set REMAX_CANON_PKG_URL to an https
-URL ending in .zip, .cab, or .inf (a zip of the extracted x64 Driver folder).
-A Canon setup .exe is not launched, because that opens a GUI. If 7-Zip is
-installed, an .exe URL is unpacked and the x64 INF inside is added with pnputil.
+If that download failed, fix the network or set REMAX_CANON_PKG_URL to an
+https URL ending in .zip, .cab, or .inf. A Canon setup .exe is not launched.
+If 7-Zip is installed, an .exe URL is unpacked and the x64 INF inside is
+added with pnputil.
 
   `$env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS3-v30.zip'
   `$env:REMAX_PRINT_USER = 'tsiogase'
@@ -3457,7 +3569,7 @@ function Get-ReportFooter {
         return @"
 RESULT PARTIAL means the RemaxSecure queue is installed and any PASS lines were read back.
 MANUAL means that item was not confirmed. Re-running the installer tries again.
-Exit code 2 is not a failed install. When this script is started with irm | iex, exit code 2 does not throw.
+Exit code 2 is not a failed install. When this script is started with irm | iex, exit code 1 and exit code 2 do not throw. LASTEXITCODE is set and this window stays open.
 1. Printer properties for $script:PrinterName, Device Settings.
 2. Paper Source Options = Cassette Feeding Unit.
 3. Output Options = Inner Finisher E1.
@@ -3774,9 +3886,15 @@ function Invoke-Install {
         }
         try { $selected = Find-SelectedInstalledDriver } catch { $selected = $null }
     }
-    if (-not $selected -and $env:REMAX_CANON_PKG_URL) {
+    if (-not $selected) {
+        $pkgUrl = Resolve-CanonPackageUrl
+        if (-not [string]::IsNullOrWhiteSpace($env:REMAX_CANON_PKG_URL)) {
+            Write-Remax ("REMAX_CANON_PKG_URL overrides the built-in driver package: " + $pkgUrl)
+        } else {
+            Write-Remax ("Driver is not installed. Downloading the built-in package " + $pkgUrl)
+        }
         try {
-            Install-CanonPackageFromUrl $env:REMAX_CANON_PKG_URL.Trim()
+            Install-CanonPackageFromUrl $pkgUrl
         } catch {
             Write-Remax ("Driver package failed: " + $_.Exception.Message)
             Write-RemaxLine $_.Exception.Message
@@ -4023,12 +4141,55 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.0') 'version string is 1.2.0'
+    Assert-Remax ($script:Version -eq '1.2.1') 'version string is 1.2.1'
+    Assert-Remax ($script:CanonPkgUrl -eq 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip') 'built-in driver URL is the public release asset'
+    Assert-Remax ($script:CanonPkgSha256 -eq '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da') 'built-in driver SHA256 is pinned'
+    Assert-Remax ($script:CanonPkgBytes -eq 26722033) 'built-in driver size is pinned'
+    Assert-Remax ((Get-BytesSha256 -Data ([byte[]](97))) -eq 'ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb') 'SHA256 of the byte a is correct'
+    $pinnedOk = Test-PinnedCanonDownload -Url $script:CanonPkgUrl -Hash $script:CanonPkgSha256 -Length $script:CanonPkgBytes
+    Assert-Remax ($pinnedOk.Ok -and $pinnedOk.Pinned) 'matching size and SHA256 pass'
+    $pinnedBad = Test-PinnedCanonDownload -Url $script:CanonPkgUrl -Hash 'deadbeef' -Length $script:CanonPkgBytes
+    Assert-Remax ((-not $pinnedBad.Ok) -and ($pinnedBad.Detail -match 'SHA256')) 'SHA256 mismatch is a clear failure'
+    $overridePkg = Test-PinnedCanonDownload -Url 'https://example.invalid/other.zip' -Hash 'deadbeef' -Length 4
+    Assert-Remax ($overridePkg.Ok -and (-not $overridePkg.Pinned)) 'a different URL is not checked against the pinned hash'
+    $savedPkg = $env:REMAX_CANON_PKG_URL
+    Remove-Item Env:REMAX_CANON_PKG_URL -ErrorAction SilentlyContinue
+    Assert-Remax ((Resolve-CanonPackageUrl) -eq $script:CanonPkgUrl) 'missing REMAX_CANON_PKG_URL uses the built-in zip'
+    $env:REMAX_CANON_PKG_URL = 'https://example.invalid/custom.zip'
+    Assert-Remax ((Resolve-CanonPackageUrl) -eq 'https://example.invalid/custom.zip') 'REMAX_CANON_PKG_URL overrides the built-in zip'
+    if ($null -eq $savedPkg) {
+        Remove-Item Env:REMAX_CANON_PKG_URL -ErrorAction SilentlyContinue
+    } else {
+        $env:REMAX_CANON_PKG_URL = $savedPkg
+    }
+    $cnsScore = Get-CanonInfPickScore -Path 'C:\pkg\x64\Driver\CNS30UA64.INF' -Model 'Canon iR-ADV C5235/5240 PS3'
+    $otherScore = Get-CanonInfPickScore -Path 'C:\pkg\x64\Driver\Other.inf' -Model 'Canon iR-ADV C5235/5240 PS3'
+    $nullScore = Get-CanonInfPickScore -Path 'C:\pkg\x64\misc\NullDriver\lasernull.inf' -Model 'Canon Laser Null Driver'
+    Assert-Remax ($cnsScore -gt $otherScore) 'CNS30UA64.INF outranks another PS3 INF'
+    Assert-Remax ($nullScore -lt 0) 'lasernull.inf is not a printer driver candidate'
+    $miniInf = @"
+[Manufacturer]
+"Canon" = Canon,NTamd64,NTamd64.6.0
+
+[Canon.NTamd64]
+"Canon iR-ADV C5235/5240 PS3" = ADVC5240,USBPRINT\CanoniR-ADV_C5235/520173
+"Canon Laser Null Driver" = NULL,USB\NULL
+
+[Canon.NTamd64.6.0]
+"Canon iR-ADV C5235/5240 PS3" = ADVC5240_AWARE,USBPRINT\CanoniR-ADV_C5235/520173
+"@
+    $miniModels = @(Get-InfDriverModels -Text $miniInf -Architecture 'amd64')
+    Assert-Remax ((Select-BestDriverName -Names $miniModels) -eq 'Canon iR-ADV C5235/5240 PS3') 'CNS30UA64-style INF selects the PS3 model'
+    Assert-Remax ((Get-IexFinishMessage 0) -eq '') 'exit code 0 has no failure message'
+    Assert-Remax ((Get-IexFinishMessage 2) -match 'RESULT PARTIAL') 'exit code 2 stays a partial message'
+    $failFinish = Get-IexFinishMessage 1
+    Assert-Remax (($failFinish -match 'RESULT FAIL') -and ($failFinish -notmatch 'throw')) 'exit code 1 is reported without throwing'
     Assert-Remax ((Get-PrintUserPromptText) -eq 'Print username (last name + first initial, lowercase, for example tsiogase)') 'prompt shows the tsiogase example'
     Assert-Remax ((Get-DriverRank 'Canon iR-ADV C5235/5240 PS3') -gt (Get-DriverRank 'Canon iR-ADV C5235/5240 PS')) 'exact PS3 outranks the older PS name'
     Assert-Remax ((Get-InfArchitectureScore 'C:\drv\x64\cn.inf') -gt (Get-InfArchitectureScore 'C:\drv\x86\cn.inf')) 'x64 INF outranks x86'
     Assert-Remax ((Test-CanonPackageVersionText '30.0.0.1') -eq $true) 'file version 30.0.0.1 is the recorded package'
     Assert-Remax ((Test-CanonPackageVersionText 'V30.00') -eq $true) 'package text 30.00 is accepted'
+    Assert-Remax ((Test-CanonPackageVersionText '30.00.0.0') -eq $true) 'INF DriverVer 30.00.0.0 is package 30.00'
     Assert-Remax ((Test-CanonPackageVersionText '30.02') -eq $false) '30.02 is not the recorded package'
     Assert-Remax ($null -eq (Test-CanonPackageVersionText '')) 'blank version is unknown, not a mismatch'
     $exactReport = Get-DriverReport -Driver @{ Name = 'Canon iR-ADV C5235/5240 PS3'; PrinterEnvironment = 'Windows x64' } -VersionText '30.0.0.1'
