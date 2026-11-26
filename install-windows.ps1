@@ -1,10 +1,11 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.1.0
-# RE/MAX Escarpment IT.
+# Remax Secure Printer - Windows installer 1.2.0
+# RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
-# username in that window. An elevated process does not see variables from a
-# normal window. To skip the prompt:
+# username in that window (last name + first initial, lowercase, for example
+# tsiogase). An elevated process does not see variables from a normal window.
+# To skip the prompt:
 #
 #   $env:REMAX_PRINT_USER = 'tsiogase'
 #   irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -29,36 +30,49 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -SelfTest
 #
-# Queue (same target as install-mac.sh):
-#   Name:     RemaxSecure
+# Recorded queue:
+#   Name:     RemaxSecure, not shared, not the default printer.
 #   URI:      lpd://172.16.105.21/RemaxSecure
-#   Port:     Standard TCP/IP port RemaxSecure_LPR, protocol LPR, port 515,
-#             queue name RemaxSecure. That is the Windows spooler form of the
-#             lpd:// URI. It does not need the optional LPR Port Monitor feature.
-#   Driver:   Canon iR-ADV C5235/5240 PS or PS3, else Canon Generic Plus PS3.
-#   Sides:    Set-PrintConfiguration -DuplexingMode OneSided
-#   Cassette / finisher:
-#             Tried on the print ticket when the driver publishes OptCas2 or
-#             IFINE1. The fleet driver does not. The script then opens
-#             Printer properties and sets Device Settings: Cassette Feeding
-#             Unit = On, Output Options = Inner Finisher E1.
-#   Enter Name:
-#             Set User Information, User Name = the print username, and
-#             Default Value Settings, Name to Set for User Name = that name
-#             (Enter Name, not the Windows logon). The Mac *%INFO_PrPr block
-#             is not read by the Windows driver.
-#   PASS on those lines requires a readback. MANUAL means the dialog could
-#   not be driven or the readback did not match. Optional REMAX_DEVICE_DAT
-#   restores printer-specific data and the global DEVMODE (PrintUI /Sr d g)
-#   before the dialog runs. This script does not invent Canon registry values.
+#   Port:     Standard TCP/IP port named 172.16.105.21 (the host).
+#             Protocol LPR (registry Protocol=2), queue RemaxSecure,
+#             LPR byte counting on (Byte Count=1), SNMP off (SNMP Enabled=0).
+#             Older installs used port RemaxSecure_LPR. The queue is moved
+#             onto the host-named port.
+#   Driver:   Canon iR-ADV C5235/5240 PS3, Canon PS3 Printer Driver Ver. 30.00,
+#             x64 (Setup.exe file version 30.0.0.1). Canon Driver Information
+#             Assist Service is not required.
+#   Sides:    Set-PrintConfiguration -DuplexingMode OneSided (1-sided Printing).
+#   Device Settings, tried first through Get-PrinterProperty / Set-PrinterProperty
+#   when the driver publishes a matching Config:* property and the readback
+#   matches. PrinterDriverData and Default DevMode are listed by value name
+#   only. Their binary layout is not published for this driver, so it is not
+#   written. UI Automation is the fallback, and it follows the recorded
+#   controls:
+#     Paper Source Options: = Cassette Feeding Unit
+#     Output Options: = Inner Finisher E1
+#     Set User Information checked, then the Settings... button on that row
+#     Dialog title Default Value Settings
+#     Name to Set for User Information: radio User Name (not Logon Name)
+#     and the text box under that radio
+#     Always Confirm User Information When Performing Secured Print stays on
+#     Confirm User Name When Printing stays off, PIN stays blank
+#     Get Device Information is not changed
+#   PASS on those lines requires a property readback or a dialog readback
+#   after Printer properties is reopened. MANUAL means that item was not
+#   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
+#   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.1.0'
+$script:Version = '1.2.0'
 $script:RawUrl = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1'
 $script:PrinterName = 'RemaxSecure'
 $script:StaleName = 'RemaxSecure_COLOUR'
 $script:DefaultHost = '172.16.105.21'
 $script:DefaultQueue = 'RemaxSecure'
-$script:PortName = 'RemaxSecure_LPR'
+$script:LegacyPortName = 'RemaxSecure_LPR'
+$script:PortName = '172.16.105.21'
+$script:ExactDriverName = 'Canon iR-ADV C5235/5240 PS3'
+$script:DriverPackageVersion = '30.00'
+$script:DriverFileVersion = '30.0.0.1'
 $script:PsfNamespace = 'http://schemas.microsoft.com/windows/2003/08/printing/printschemaframework'
 $script:LogFile = $null
 $script:SupportDir = $null
@@ -155,10 +169,13 @@ Remax Secure Printer installer $script:Version (Windows)
   powershell -NoProfile -ExecutionPolicy Bypass -File install-windows.ps1 -SelfTest
 
 Environment (set them in the elevated PowerShell window):
-  REMAX_PRINT_USER       Print username (Enter Name). Prompted when unset.
+  REMAX_PRINT_USER       Print username (last name + first initial, lowercase,
+                         for example tsiogase). Prompted when unset.
   REMAX_CANON_PKG_URL    Optional https URL of a .zip, .cab, or .inf driver.
-                         A Canon setup .exe is not launched.
+                         A Canon setup .exe is not launched. Prefer the
+                         x64 folder of Canon PS3 Printer Driver Ver. 30.00.
   REMAX_PRINTER_URI      Default lpd://172.16.105.21/RemaxSecure
+                         The Standard TCP/IP port is named after the host.
   REMAX_LPR_BYTE_COUNT   Default on. Set to 0 to disable LPR byte counting.
   REMAX_MODE             Set to verify for irm | iex read-only mode.
   REMAX_DEVICE_UI        Set to 0 to skip Printer properties automation.
@@ -180,6 +197,11 @@ function Test-ModelSpecificPsDriver {
     return $true
 }
 
+function Test-ExactPs3Driver {
+    param([string]$Name)
+    return ($Name -eq $script:ExactDriverName)
+}
+
 function Test-GenericPlusPs3 {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
@@ -189,9 +211,30 @@ function Test-GenericPlusPs3 {
 
 function Get-DriverRank {
     param([string]$Name)
+    if (Test-ExactPs3Driver $Name) { return 3 }
     if (Test-ModelSpecificPsDriver $Name) { return 2 }
     if (Test-GenericPlusPs3 $Name) { return 1 }
     return 0
+}
+
+function Test-CanonPackageVersionText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $trim = $Text.Trim()
+    if ($trim -eq $script:DriverFileVersion) { return $true }
+    if ($trim.StartsWith($script:DriverFileVersion)) { return $true }
+    if ($trim -match '(?i)(^|[^0-9])30\.00([^0-9]|$)') { return $true }
+    return $false
+}
+
+function Get-InfArchitectureScore {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return 1 }
+    $norm = $Path.Replace('/', '\')
+    if ($norm -match '(?i)\\(x64|amd64|win64)\\') { return 2 }
+    if ($norm -match '(?i)NTamd64') { return 2 }
+    if ($norm -match '(?i)\\(x86|win32|32bit)\\') { return 0 }
+    return 1
 }
 
 function Select-BestDriverName {
@@ -237,12 +280,18 @@ function Resolve-PrinterTarget {
     if ($queue -notmatch '^[A-Za-z0-9._-]{1,64}$') {
         throw "LPR queue name must be 1-64 letters, digits, dot, underscore, or hyphen."
     }
+    $script:PortName = $hostName
     return @{
         Host       = $hostName
         Queue      = $queue
         Uri        = ("lpd://{0}/{1}" -f $hostName, $queue)
+        PortName   = $hostName
         ByteCount  = -not ($env:REMAX_LPR_BYTE_COUNT -eq '0')
     }
+}
+
+function Get-PrintUserPromptText {
+    return 'Print username (last name + first initial, lowercase, for example tsiogase)'
 }
 
 function Remove-InfComment {
@@ -597,7 +646,7 @@ is not visible after User Account Control elevates:
 }
 
 function Read-PrintUserPrompt {
-    $prompt = 'Print username (Enter Name, the name on the copier)'
+    $prompt = Get-PrintUserPromptText
     $redirected = $true
     try {
         $redirected = [bool][Console]::IsInputRedirected
@@ -655,6 +704,7 @@ function Resolve-PrintUserName {
     if (-not (Test-PrintUserName $user)) {
         throw @"
 Print username must be 1-64 characters: letters, digits, dot, underscore, hyphen.
+Format is last name + first initial, lowercase, for example tsiogase.
 The Windows logon name is not used. Set it in the elevated window:
 
   `$env:REMAX_PRINT_USER = 'tsiogase'
@@ -736,6 +786,95 @@ function Test-DriverPpdAcceptable {
     return $true
 }
 
+function Get-FileVersionOrEmpty {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    try {
+        $info = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+        if ($info.FileVersion) { return [string]$info.FileVersion }
+    } catch { }
+    return ''
+}
+
+function Get-DriverFileVersionText {
+    param($Driver)
+    if (-not $Driver) { return '' }
+    $primary = New-Object System.Collections.Generic.List[string]
+    $extra = New-Object System.Collections.Generic.List[string]
+    foreach ($prop in @('ConfigFile', 'DataFile', 'DriverPath')) {
+        $value = ''
+        try { $value = [string]$Driver.$prop } catch { $value = '' }
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        if ([System.IO.Path]::IsPathRooted($value)) { [void]$primary.Add($value) }
+    }
+    try {
+        foreach ($file in @($Driver.DependentFiles)) {
+            if ([string]::IsNullOrWhiteSpace([string]$file)) { continue }
+            if ([System.IO.Path]::IsPathRooted([string]$file)) { [void]$extra.Add([string]$file) }
+        }
+    } catch { }
+    foreach ($path in @($primary.ToArray() + $extra.ToArray())) {
+        $version = Get-FileVersionOrEmpty $path
+        if ((Test-CanonPackageVersionText $version) -eq $true) { return $version }
+    }
+    foreach ($path in @($primary.ToArray())) {
+        $version = Get-FileVersionOrEmpty $path
+        if ($version) { return $version }
+    }
+    return ''
+}
+
+function Get-DriverReport {
+    param($Driver, [string]$VersionText)
+    $name = ''
+    $environment = ''
+    if ($Driver) {
+        try { $name = [string]$Driver.Name } catch { $name = '' }
+        try { $environment = [string]$Driver.PrinterEnvironment } catch { $environment = '' }
+    }
+    if (-not (Test-ExactPs3Driver $name)) {
+        $shown = $name
+        if (-not $shown) { $shown = 'unknown' }
+        return @{
+            State  = 'MANUAL'
+            Detail = ("installed driver '" + $shown + "' is not " + $script:ExactDriverName)
+        }
+    }
+    if ($null -eq $VersionText -or $VersionText -eq '') {
+        if ($Driver -and -not $PSBoundParameters.ContainsKey('VersionText')) {
+            $VersionText = Get-DriverFileVersionText $Driver
+        }
+    }
+    $versionState = Test-CanonPackageVersionText $VersionText
+    $nativeX64 = $false
+    try { $nativeX64 = [bool][Environment]::Is64BitOperatingSystem } catch { $nativeX64 = $true }
+    $archOk = $true
+    if ($environment) {
+        if ($nativeX64) { $archOk = [bool]($environment -match 'x64') }
+        else { $archOk = [bool]($environment -match 'x86|32') }
+    }
+    $problems = @()
+    if (-not $archOk) {
+        $problems += ("environment '" + $environment + "' is not the x64 package")
+    }
+    if ($versionState -eq $false) {
+        $problems += ("file version '" + $VersionText + "' is not " + $script:DriverFileVersion + " (package " + $script:DriverPackageVersion + ")")
+    }
+    if ($problems.Count -gt 0) {
+        return @{
+            State  = 'MANUAL'
+            Detail = ($name + ". " + ($problems -join '. '))
+        }
+    }
+    $detail = $name + " (PS3 Printer Driver Ver. " + $script:DriverPackageVersion
+    if ($environment) { $detail = $detail + ", " + $environment }
+    if ($VersionText) { $detail = $detail + ", file version " + $VersionText }
+    else { $detail = $detail + ", package version was not exposed by the spooler" }
+    $detail = $detail + ")"
+    return @{ State = 'PASS'; Detail = $detail }
+}
+
 function Find-SelectedInstalledDriver {
     Import-PrintModule
     $best = $null
@@ -747,9 +886,12 @@ function Find-SelectedInstalledDriver {
         if (-not (Test-DriverPpdAcceptable $driver)) { continue }
         $environment = [string]$driver.PrinterEnvironment
         $archBonus = 0
-        if ($nativeX64 -and $environment -match 'x64') { $archBonus = 1 }
-        if ((-not $nativeX64) -and $environment -match 'x86') { $archBonus = 1 }
-        $score = ($rank * 10) + $archBonus
+        if ($nativeX64 -and $environment -match 'x64') { $archBonus = 2 }
+        if ((-not $nativeX64) -and $environment -match 'x86') { $archBonus = 2 }
+        $versionBonus = 0
+        $versionText = Get-DriverFileVersionText $driver
+        if ((Test-CanonPackageVersionText $versionText) -eq $true) { $versionBonus = 1 }
+        $score = ($rank * 10) + $archBonus + $versionBonus
         if ($score -gt $bestScore) {
             $bestScore = $score
             $best = $driver
@@ -855,20 +997,26 @@ function Install-CanonPackageFromUrl {
         $bestInf = $null
         $bestModel = $null
         $bestRank = 0
+        $bestPathScore = -1
         $arch = Get-DriverArchitecture
         foreach ($inf in @(Get-ChildItem -LiteralPath $extract -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)) {
             $models = @(Get-InfDriverModels -Text (Read-AllText $inf.FullName) -Architecture $arch)
             $choice = Select-BestDriverName -Names $models
             $rank = Get-DriverRank $choice
-            Write-Remax ("INF " + $inf.FullName + " selected model '" + $choice + "' rank " + $rank)
-            if ($rank -gt $bestRank) {
+            $pathScore = Get-InfArchitectureScore $inf.FullName
+            Write-Remax ("INF " + $inf.FullName + " selected model '" + $choice + "' rank " + $rank + " path " + $pathScore)
+            $better = $false
+            if ($rank -gt $bestRank) { $better = $true }
+            elseif ($rank -eq $bestRank -and $rank -gt 0 -and $pathScore -gt $bestPathScore) { $better = $true }
+            if ($better) {
                 $bestRank = $rank
+                $bestPathScore = $pathScore
                 $bestInf = $inf.FullName
                 $bestModel = $choice
             }
         }
         if (-not $bestInf) {
-            throw "The package does not contain an INF model for Canon iR-ADV C5235/5240 PS or Canon Generic Plus PS3."
+            throw ("The package does not contain an INF model for " + $script:ExactDriverName + ".")
         }
         Install-DriverFromInf -InfPath $bestInf -Model $bestModel
     } finally {
@@ -887,6 +1035,7 @@ function Search-DriverStore {
     $bestInf = $null
     $bestModel = $null
     $bestRank = 0
+    $bestPathScore = -1
     foreach ($dir in $dirs) {
         foreach ($inf in @(Get-ChildItem -LiteralPath $dir.FullName -Filter *.inf -Recurse -File -ErrorAction SilentlyContinue)) {
             $text = ''
@@ -895,8 +1044,13 @@ function Search-DriverStore {
             $models = @(Get-InfDriverModels -Text $text -Architecture $arch)
             $choice = Select-BestDriverName -Names $models
             $rank = Get-DriverRank $choice
-            if ($rank -gt $bestRank) {
+            $pathScore = Get-InfArchitectureScore $inf.FullName
+            $better = $false
+            if ($rank -gt $bestRank) { $better = $true }
+            elseif ($rank -eq $bestRank -and $rank -gt 0 -and $pathScore -gt $bestPathScore) { $better = $true }
+            if ($better) {
                 $bestRank = $rank
+                $bestPathScore = $pathScore
                 $bestInf = $inf.FullName
                 $bestModel = $choice
             }
@@ -912,7 +1066,7 @@ function Search-DriverStore {
 
 function Show-MissingDriverHelp {
     param([string[]]$Installed)
-    Write-RemaxLine "The Canon PS driver for iR-ADV C5235/5240 is not installed."
+    Write-RemaxLine ("The driver " + $script:ExactDriverName + " is not installed.")
     Write-RemaxLine "Installed printer drivers:"
     if (@($Installed).Count -eq 0) {
         Write-RemaxLine "  (none)"
@@ -921,70 +1075,215 @@ function Show-MissingDriverHelp {
     }
     Write-RemaxLine @"
 
-Install a Windows PostScript driver, then run this installer again.
-
-Accepted driver names:
-  Canon iR-ADV C5235/5240 PS
-  Canon iR-ADV C5235/5240 PS3
-  Canon Generic Plus PS3
-
-For Generic Plus PS3, Device Settings configuration profile must be
-iR-ADV C5235/5240. PrintManagement cannot read that profile.
+Install Canon PS3 Printer Driver Ver. $script:DriverPackageVersion (x64).
+The recorded package is PS_Driver_V3000_32_64_EN_05.exe. Setup.exe in the
+x64 folder has file version $script:DriverFileVersion. The driver name after
+install is $script:ExactDriverName.
+Canon publishes that package on the imageRUNNER ADVANCE C5235 support page.
+The download is a click-through, so this script has no built-in URL.
+Canon Driver Information Assist Service is not required. If the package
+installs it, that is fine. This script does not start or install that service.
 Do not use the UFR II or PCL driver for this queue.
 The Mac PPD CNMCIRAC5235S2.ppd.gz is not a Windows driver package.
-Canon publishes the PostScript 3 driver and Generic Plus PS3 on the
-imageRUNNER ADVANCE C5235 support page. This script has no built-in download.
+A different Canon PS name can still create the queue, and the report marks
+DRIVER as MANUAL until the name is exactly $script:ExactDriverName.
 
 To install from a package you host, set REMAX_CANON_PKG_URL to an https
-URL ending in .zip, .cab, or .inf (a zip of the extracted Driver folder).
+URL ending in .zip, .cab, or .inf (a zip of the extracted x64 Driver folder).
 A Canon setup .exe is not launched, because that opens a GUI. If 7-Zip is
-installed, an .exe URL is unpacked and the INF inside is added with pnputil.
+installed, an .exe URL is unpacked and the x64 INF inside is added with pnputil.
 
-  `$env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS-driver.zip'
+  `$env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS3-v30.zip'
   `$env:REMAX_PRINT_USER = 'tsiogase'
   irm $script:RawUrl | iex
 "@
+}
+
+function Write-AssistServiceNote {
+    $found = $null
+    try {
+        foreach ($svc in @(Get-Service -ErrorAction SilentlyContinue)) {
+            $display = [string]$svc.DisplayName
+            $name = [string]$svc.Name
+            if ($display -match 'Driver Information Assist' -or $name -match 'Driver Information Assist') {
+                $found = $display
+                if (-not $found) { $found = $name }
+                break
+            }
+        }
+    } catch { }
+    if ($found) {
+        Write-Remax ("Canon Driver Information Assist Service is present (" + $found + "). The queue does not require it.")
+    } else {
+        Write-Remax "Canon Driver Information Assist Service is not installed. The queue does not require it."
+    }
+}
+
+function Get-PortMonitorKey {
+    param([string]$Name)
+    return (Join-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports' $Name)
+}
+
+function Read-PortRegistry {
+    param([string]$Name)
+    $path = Get-PortMonitorKey $Name
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    $item = Get-ItemProperty -LiteralPath $path
+    $names = @($item.PSObject.Properties.Name)
+    $protocol = $null
+    $queue = $null
+    $byte = $null
+    $snmp = $null
+    if ($names -contains 'Protocol') { $protocol = [int]$item.Protocol }
+    if ($names -contains 'Queue') { $queue = [string]$item.Queue }
+    if ($names -contains 'Byte Count') { $byte = [int]$item.'Byte Count' }
+    if ($names -contains 'SNMP Enabled') { $snmp = [int]$item.'SNMP Enabled' }
+    return @{
+        Protocol  = $protocol
+        Queue     = $queue
+        ByteCount = $byte
+        Snmp      = $snmp
+        Present   = $true
+    }
+}
+
+function Test-RecordedPortValues {
+    param($Protocol, $Queue, $ByteCount, $Snmp, [string]$ExpectedQueue, [bool]$ExpectByte)
+    if ($null -eq $Protocol -or [int]$Protocol -ne 2) { return $false }
+    if ([string]$Queue -ne $ExpectedQueue) { return $false }
+    $wantByte = 0
+    if ($ExpectByte) { $wantByte = 1 }
+    if ($null -eq $ByteCount -or [int]$ByteCount -ne $wantByte) { return $false }
+    if ($null -eq $Snmp -or [int]$Snmp -ne 0) { return $false }
+    return $true
+}
+
+function Set-PortRegistry {
+    param([string]$Name, $Target)
+    $path = Get-PortMonitorKey $Name
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Remax ("Standard TCP/IP port registry key is not present yet: " + $path)
+        return $false
+    }
+    $byte = 0
+    if ($Target.ByteCount) { $byte = 1 }
+    New-ItemProperty -LiteralPath $path -Name 'Protocol' -PropertyType DWord -Value 2 -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'Queue' -PropertyType String -Value $Target.Queue -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'Byte Count' -PropertyType DWord -Value $byte -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'SNMP Enabled' -PropertyType DWord -Value 0 -Force | Out-Null
+    return $true
 }
 
 function Get-PortSnapshot {
     param([string]$Name)
     $safe = $Name.Replace("'", "''")
     $port = Get-CimInstance -ClassName Win32_TCPIPPrinterPort -Filter ("Name='" + $safe + "'")
-    if (-not $port) { return $null }
+    $registry = $null
+    try { $registry = Read-PortRegistry $Name } catch { $registry = $null }
+    $cmdlet = $null
+    try { $cmdlet = Get-PrinterPort -Name $Name -ErrorAction Stop } catch { $cmdlet = $null }
+    if (-not $port -and -not $registry -and -not $cmdlet) { return $null }
+    $hostName = ''
+    $queue = ''
+    $protocol = 0
+    $portNumber = 0
+    $byteCount = $false
+    $snmp = $false
+    $snmpKnown = $false
+    if ($port) {
+        $hostName = [string]$port.HostAddress
+        $queue = [string]$port.Queue
+        $protocol = [int]$port.Protocol
+        $portNumber = [int]$port.PortNumber
+        $byteCount = [bool]$port.ByteCount
+        if ($port.PSObject.Properties.Name -contains 'SNMPEnabled') {
+            $snmp = [bool]$port.SNMPEnabled
+            $snmpKnown = $true
+        }
+    }
+    if ($cmdlet) {
+        if (-not $hostName -and $cmdlet.PrinterHostAddress) { $hostName = [string]$cmdlet.PrinterHostAddress }
+        if ($cmdlet.PSObject.Properties.Name -contains 'SNMPEnabled') {
+            $snmp = [bool]$cmdlet.SNMPEnabled
+            $snmpKnown = $true
+        }
+    }
+    if ($registry) {
+        if ($null -ne $registry.Queue -and $registry.Queue -ne '') { $queue = [string]$registry.Queue }
+        if ($null -ne $registry.Protocol) { $protocol = [int]$registry.Protocol }
+        if ($null -ne $registry.ByteCount) { $byteCount = ([int]$registry.ByteCount -ne 0) }
+        if ($null -ne $registry.Snmp) {
+            $snmp = ([int]$registry.Snmp -ne 0)
+            $snmpKnown = $true
+        }
+    }
     return @{
-        Name       = [string]$port.Name
-        Host       = [string]$port.HostAddress
-        Queue      = [string]$port.Queue
-        Protocol   = [int]$port.Protocol
-        PortNumber = [int]$port.PortNumber
-        ByteCount  = [bool]$port.ByteCount
-        Cim        = $port
+        Name        = $Name
+        Host        = $hostName
+        Queue       = $queue
+        Protocol    = $protocol
+        PortNumber  = $portNumber
+        ByteCount   = $byteCount
+        SnmpEnabled = $snmp
+        SnmpKnown   = $snmpKnown
+        Cim         = $port
+        Registry    = $registry
+        Cmdlet      = $cmdlet
     }
 }
 
 function Test-PortMatches {
     param($Snapshot, $Target)
     if (-not $Snapshot) { return $false }
+    if ($Snapshot.Name -and $Target.PortName -and $Snapshot.Name -ne $Target.PortName -and $Snapshot.Name -ne $script:PortName) { return $false }
     if ($Snapshot.Host -ne $Target.Host) { return $false }
     if ($Snapshot.Queue -ne $Target.Queue) { return $false }
-    if ($Snapshot.Protocol -ne 2) { return $false }
-    if ($Snapshot.PortNumber -ne 515) { return $false }
+    if ([int]$Snapshot.Protocol -ne 2) { return $false }
+    if ($Snapshot.PortNumber -and [int]$Snapshot.PortNumber -ne 515) { return $false }
     if ([bool]$Snapshot.ByteCount -ne [bool]$Target.ByteCount) { return $false }
+    if (-not $Snapshot.SnmpKnown) { return $false }
+    if ([bool]$Snapshot.SnmpEnabled) { return $false }
+    if ($Snapshot.Registry) {
+        $regOk = Test-RecordedPortValues -Protocol $Snapshot.Registry.Protocol -Queue $Snapshot.Registry.Queue -ByteCount $Snapshot.Registry.ByteCount -Snmp $Snapshot.Registry.Snmp -ExpectedQueue $Target.Queue -ExpectByte ([bool]$Target.ByteCount)
+        if (-not $regOk) { return $false }
+    }
     return $true
+}
+
+function Format-PortDetail {
+    param($Snapshot, $Target)
+    $byte = 'off'
+    if ($Target.ByteCount) { $byte = 'on' }
+    $snmp = 'off'
+    if ($Snapshot -and $Snapshot.SnmpEnabled) { $snmp = 'on' }
+    $name = $script:PortName
+    if ($Snapshot -and $Snapshot.Name) { $name = [string]$Snapshot.Name }
+    $detail = "Standard TCP/IP port " + $name + ", protocol LPR, queue " + $Target.Queue + ", byte counting " + $byte + ", SNMP " + $snmp
+    if ($Snapshot -and $Snapshot.Registry) {
+        $detail = $detail + " (registry Protocol=" + $Snapshot.Registry.Protocol + ", Queue=" + $Snapshot.Registry.Queue + ", Byte Count=" + $Snapshot.Registry.ByteCount + ", SNMP Enabled=" + $Snapshot.Registry.Snmp + ")"
+    } elseif ($Snapshot) {
+        $detail = $detail + " (port registry key was not readable)"
+    }
+    return $detail
 }
 
 function Set-PortFields {
     param($Snapshot, $Target)
     $port = $Snapshot.Cim
-    $port.HostAddress = $Target.Host
-    $port.Queue = $Target.Queue
-    $port.Protocol = [uint32]2
-    $port.PortNumber = [uint32]515
-    $port.ByteCount = [bool]$Target.ByteCount
-    if ($port.PSObject.Properties.Name -contains 'SNMPEnabled') {
-        $port.SNMPEnabled = $false
+    if ($port) {
+        $port.HostAddress = $Target.Host
+        $port.Queue = $Target.Queue
+        $port.Protocol = [uint32]2
+        $port.PortNumber = [uint32]515
+        $port.ByteCount = [bool]$Target.ByteCount
+        if ($port.PSObject.Properties.Name -contains 'SNMPEnabled') {
+            $port.SNMPEnabled = $false
+        }
+        Set-CimInstance -InputObject $port | Out-Null
     }
-    Set-CimInstance -InputObject $port | Out-Null
+    $name = $script:PortName
+    if ($Snapshot.Name) { $name = [string]$Snapshot.Name }
+    [void](Set-PortRegistry -Name $name -Target $Target)
 }
 
 function Add-LprPort {
@@ -1037,14 +1336,82 @@ function Ensure-LprPort {
         throw "Port $script:PortName was not created as a Standard TCP/IP port."
     }
     if (-not (Test-PortMatches $snapshot $Target)) {
-        Write-Remax "Updating LPR host, queue, protocol 2, port 515, and byte counting on the existing port."
+        Write-Remax "Updating LPR host, queue, protocol 2, port 515, byte counting, and SNMP off on the existing port."
         Set-PortFields $snapshot $Target
         $snapshot = Get-PortSnapshot $script:PortName
     }
     if (-not (Test-PortMatches $snapshot $Target)) {
-        throw ("Port " + $script:PortName + " is still not LPR to " + $Target.Uri + ". Host=" + $snapshot.Host + " Queue=" + $snapshot.Queue + " Protocol=" + $snapshot.Protocol + " PortNumber=" + $snapshot.PortNumber)
+        $snmp = ''
+        if ($snapshot) { $snmp = [string]$snapshot.SnmpEnabled }
+        throw ("Port " + $script:PortName + " is still not LPR to " + $Target.Uri + " with SNMP off. Host=" + $snapshot.Host + " Queue=" + $snapshot.Queue + " Protocol=" + $snapshot.Protocol + " PortNumber=" + $snapshot.PortNumber + " SNMP=" + $snmp)
     }
     return $snapshot
+}
+
+function Remove-LegacyPortIfUnused {
+    if ($script:LegacyPortName -eq $script:PortName) { return }
+    $busy = $false
+    try {
+        foreach ($printer in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            if ([string]$printer.PortName -eq $script:LegacyPortName) { $busy = $true }
+        }
+    } catch { }
+    if ($busy) {
+        Write-Remax ("Legacy port " + $script:LegacyPortName + " is still used by another queue. Leaving it.")
+        return
+    }
+    $exists = $null
+    try { $exists = Get-PortSnapshot $script:LegacyPortName } catch { $exists = $null }
+    if (-not $exists) { return }
+    try {
+        Remove-PrinterPort -Name $script:LegacyPortName
+        Write-Remax ("Removed legacy port " + $script:LegacyPortName)
+    } catch {
+        Write-Remax ("Could not remove legacy port " + $script:LegacyPortName + ": " + $_.Exception.Message)
+    }
+}
+
+function Get-DefaultPrinterName {
+    try {
+        $printer = Get-CimInstance -ClassName Win32_Printer -Filter 'Default=True'
+        if ($printer) { return [string]$printer.Name }
+    } catch { }
+    return ''
+}
+
+function Set-DefaultPrinterByName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $safe = $Name.Replace("'", "''")
+    try {
+        $printer = Get-CimInstance -ClassName Win32_Printer -Filter ("Name='" + $safe + "'")
+        if (-not $printer) { return $false }
+        $result = Invoke-CimMethod -InputObject $printer -MethodName SetDefaultPrinter
+        if ($result -and $null -ne $result.ReturnValue) {
+            return ([int]$result.ReturnValue -eq 0)
+        }
+        return $true
+    } catch {
+        Write-Remax ("Could not set default printer " + $Name + ": " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Get-FallbackDefaultPrinter {
+    $names = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($printer in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            $name = [string]$printer.Name
+            if ($name -and $name -ne $script:PrinterName) { [void]$names.Add($name) }
+        }
+    } catch { }
+    foreach ($prefer in @('Microsoft Print to PDF', 'Microsoft XPS Document Writer')) {
+        foreach ($name in @($names.ToArray())) {
+            if ($name -eq $prefer) { return $name }
+        }
+    }
+    if ($names.Count -gt 0) { return $names[0] }
+    return ''
 }
 
 function Get-PrinterOrNull {
@@ -1083,18 +1450,42 @@ function Ensure-PrinterQueue {
         [string]$DriverName,
         $Target
     )
+    $previousDefault = Get-DefaultPrinterName
     $existing = Get-PrinterOrNull $script:PrinterName
     if (-not $existing) {
-        Write-Remax ("Creating queue " + $script:PrinterName)
+        Write-Remax ("Creating queue " + $script:PrinterName + " on port " + $script:PortName)
         Add-Printer -Name $script:PrinterName -DriverName $DriverName -PortName $script:PortName
     } else {
-        Write-Remax ("Updating existing queue " + $script:PrinterName)
+        $oldPort = [string]$existing.PortName
+        if ($oldPort -and $oldPort -ne $script:PortName) {
+            Write-Remax ("Moving queue " + $script:PrinterName + " from port " + $oldPort + " to " + $script:PortName)
+        } else {
+            Write-Remax ("Updating existing queue " + $script:PrinterName)
+        }
         Set-Printer -Name $script:PrinterName -DriverName $DriverName -PortName $script:PortName
     }
     try {
-        Set-Printer -Name $script:PrinterName -Comment 'RE/MAX Secure Printer' -Location 'RE/MAX Escarpment'
+        Set-Printer -Name $script:PrinterName -Shared $false -Comment 'RE/MAX Secure Printer' -Location 'RE/MAX Escarpment'
     } catch {
-        Write-Remax ("Comment and location were not set: " + $_.Exception.Message)
+        Write-Remax ("Sharing, comment, or location was not set: " + $_.Exception.Message)
+        try { Set-Printer -Name $script:PrinterName -Shared $false } catch {
+            Write-Remax ("Could not clear sharing: " + $_.Exception.Message)
+        }
+    }
+    $currentDefault = Get-DefaultPrinterName
+    if ($currentDefault -eq $script:PrinterName) {
+        $restore = ''
+        if ($previousDefault -and $previousDefault -ne $script:PrinterName) {
+            $restore = $previousDefault
+        } else {
+            $restore = Get-FallbackDefaultPrinter
+        }
+        if ($restore) {
+            Write-Remax ("Restoring default printer " + $restore + " so " + $script:PrinterName + " is not the default.")
+            [void](Set-DefaultPrinterByName $restore)
+        } else {
+            Write-Remax ($script:PrinterName + " is the only printer, so Windows keeps it as the default.")
+        }
     }
     try {
         $printer = Get-CimInstance -ClassName Win32_Printer -Filter ("Name='" + $script:PrinterName.Replace("'", "''") + "'")
@@ -1104,6 +1495,7 @@ function Ensure-PrinterQueue {
     } catch {
         Write-Remax ("Resume printer skipped: " + $_.Exception.Message)
     }
+    Remove-LegacyPortIfUnused
 }
 
 function Set-OneSided {
@@ -1169,9 +1561,13 @@ function Get-HardwareChoice {
         [string]$Kind
     )
     if ($Kind -eq 'cassette') {
-        return Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName 'OptCas2' -FeatureDisplay 'Cassette Feeding Unit' -OptionDisplay 'On'
+        $byToken = Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName 'OptCas2' -FeatureDisplay 'Paper Source Options' -OptionDisplay 'Cassette Feeding Unit'
+        if ($byToken) { return $byToken }
+        return Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName '' -FeatureDisplay 'Paper Source Options' -OptionDisplay 'Cassette Feeding Unit'
     }
-    return Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName 'IFINE1' -FeatureDisplay '' -OptionDisplay 'Inner Finisher E1'
+    $byToken = Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName 'IFINE1' -FeatureDisplay 'Output Options' -OptionDisplay 'Inner Finisher E1'
+    if ($byToken) { return $byToken }
+    return Find-PrintFeatureOption -CapabilitiesXml $CapabilitiesXml -OptionLocalName '' -FeatureDisplay 'Output Options' -OptionDisplay 'Inner Finisher E1'
 }
 
 function ConvertTo-CanonLabel {
@@ -1199,47 +1595,6 @@ function Test-LabelInSet {
     foreach ($item in @($Set)) {
         if (Test-CanonLabelEquals $Label $item) { return $true }
     }
-    return $false
-}
-
-function Test-LogonModeLabel {
-    param([string]$Label)
-    return (Test-LabelInSet $Label @(
-        'Logon Name', 'Logon', 'Log-in name', 'Log in name', 'Login name', 'Login',
-        'Computer name', 'Computer', 'Domain name', 'Windows logon name',
-        'User Account Name', 'User Account Display Name', 'User Principal Name'
-    ))
-}
-
-function Test-EnterModeLabel {
-    param([string]$Label, [string]$PrintUser)
-    if (Test-LogonModeLabel $Label) { return $false }
-    $norm = (ConvertTo-CanonLabel $Label).ToLowerInvariant()
-    if (-not $norm) { return $false }
-    if ($PrintUser -and (Test-CanonLabelEquals $Label $PrintUser)) { return $true }
-    return (Test-LabelInSet $Label @(
-        'Enter Name', 'Entered Name', 'Name entered', 'Any desired name', 'Desired name',
-        'Specify name', 'Custom name', 'Custom', 'Input name', 'Set name', 'Any name',
-        'Enter a name'
-    ))
-}
-
-function Test-EnterNameConfigured {
-    param(
-        [string]$UserField,
-        [string]$NameToSet,
-        [string]$PrintUser,
-        [bool]$SawNameToSet
-    )
-    if (-not $SawNameToSet) { return $false }
-    if (Test-LogonModeLabel $NameToSet) { return $false }
-    if ($PrintUser) {
-        if (-not (Test-CanonLabelEquals $UserField $PrintUser)) { return $false }
-    } elseif ([string]::IsNullOrWhiteSpace($UserField)) {
-        return $false
-    }
-    if (Test-EnterModeLabel $NameToSet $PrintUser) { return $true }
-    if ($UserField -and (Test-CanonLabelEquals $NameToSet $UserField)) { return $true }
     return $false
 }
 
@@ -1358,9 +1713,34 @@ function Find-CanonEditByLabel {
     return $null
 }
 
+function Select-ControlBelow {
+    param($Elements, $Anchor, [string]$ControlType)
+    if (-not $Anchor) { return $null }
+    $best = $null
+    $bestDy = [double]::MaxValue
+    $anchorLeft = [double]$Anchor.Left
+    $anchorBottom = [double]$Anchor.Bottom
+    foreach ($el in @(Get-CanonElements $Elements)) {
+        if (-not $el) { continue }
+        if (Test-ElementOffscreen $el) { continue }
+        if ($ControlType -and $el.ControlType -ne $ControlType) { continue }
+        if ([double]$el.Top -lt ([double]$Anchor.Top + 8)) { continue }
+        $elLeft = [double]$el.Left
+        if ($elLeft -lt ($anchorLeft - 10)) { continue }
+        if ($elLeft -gt ($anchorLeft + 220)) { continue }
+        $dy = [double]$el.Top - $anchorBottom
+        if ($dy -lt -4) { continue }
+        if ($dy -lt $bestDy) {
+            $bestDy = $dy
+            $best = $el
+        }
+    }
+    return $best
+}
+
 function Find-CanonDeviceTargets {
     param($Elements)
-    $cassette = Select-LabeledControl -Elements $Elements -Labels @('Cassette Feeding Unit') -ControlType 'CheckBox'
+    $paper = Find-CanonComboByLabel -Elements $Elements -Labels @('Paper Source Options')
     $output = Find-CanonComboByLabel -Elements $Elements -Labels @('Output Options')
     $user = Select-LabeledControl -Elements $Elements -Labels @('Set User Information') -ControlType 'CheckBox'
     $settings = $null
@@ -1369,7 +1749,7 @@ function Find-CanonDeviceTargets {
     }
     $profile = Find-CanonComboByLabel -Elements $Elements -Labels @('Config. Profile', 'Configuration Profile', 'Config Profile')
     return @{
-        Cassette     = $cassette
+        PaperCombo   = $paper
         OutputCombo  = $output
         UserInfo     = $user
         UserSettings = $settings
@@ -1377,24 +1757,38 @@ function Find-CanonDeviceTargets {
     }
 }
 
-function Find-CanonUserDialogTargets {
+function Find-CanonDefaultValueTargets {
     param($Elements)
-    $edit = Find-CanonEditByLabel -Elements $Elements -Labels @('User Name')
-    $button = Select-LabeledControl -Elements $Elements -Labels @('Default Value Settings', 'User Name Management') -ControlType 'Button'
-    return @{ UserNameEdit = $edit; DefaultButton = $button }
-}
-
-function Find-CanonDefaultTargets {
-    param($Elements)
-    $combo = Find-CanonComboByLabel -Elements $Elements -Labels @('Name to Set for User Name', 'Name Set for User Name')
-    $edit = Find-CanonEditByLabel -Elements $Elements -Labels @('Name to Set for User Name', 'Name Set for User Name')
-    $radios = @()
+    $userRadio = $null
+    $logonRadio = $null
     foreach ($el in @(Get-CanonElements $Elements)) {
         if (-not $el) { continue }
         if (Test-ElementOffscreen $el) { continue }
-        if ($el.ControlType -eq 'RadioButton') { $radios += $el }
+        if ($el.ControlType -ne 'RadioButton') { continue }
+        if (Test-CanonLabelEquals $el.Name 'User Name') { $userRadio = $el }
+        if (Test-CanonLabelEquals $el.Name 'Logon Name') { $logonRadio = $el }
     }
-    return @{ Combo = $combo; Edit = $edit; Radios = @($radios) }
+    $nameEdit = Select-ControlBelow -Elements $Elements -Anchor $userRadio -ControlType 'Edit'
+    $always = Select-LabeledControl -Elements $Elements -Labels @('Always Confirm User Information When Performing Secured Print') -ControlType 'CheckBox'
+    $confirm = Select-LabeledControl -Elements $Elements -Labels @('Confirm User Name When Printing') -ControlType 'CheckBox'
+    $pinEdit = Find-CanonEditByLabel -Elements $Elements -Labels @('PIN', 'PIN for Secured Print', 'Password for Secured Print')
+    if ($pinEdit -and $nameEdit -and ($pinEdit.Top -eq $nameEdit.Top) -and ($pinEdit.Left -eq $nameEdit.Left)) {
+        $pinEdit = $null
+    }
+    return @{
+        UserNameRadio    = $userRadio
+        LogonRadio       = $logonRadio
+        NameEdit         = $nameEdit
+        AlwaysConfirm    = $always
+        ConfirmPrinting  = $confirm
+        PinEdit          = $pinEdit
+    }
+}
+
+function Test-DefaultValueTitle {
+    param([string]$Title)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
+    return [bool]($Title -like '*Default Value Settings*')
 }
 
 function Resolve-CanonChoiceLabel {
@@ -1419,27 +1813,14 @@ function Resolve-FinisherLabel {
     return $null
 }
 
-function Resolve-NameToSetLabel {
-    param([string[]]$Labels, [string]$PrintUser, [switch]$KnownOnly)
-    $modes = @(
-        'Enter Name', 'Entered Name', 'Name entered', 'Any desired name',
-        'Desired name', 'Specify name', 'Custom name', 'Custom', 'Input name',
-        'Set name', 'Any name', 'Enter a name'
-    )
-    $exact = Resolve-CanonChoiceLabel -Labels $Labels -Accept $modes
+function Resolve-PaperSourceLabel {
+    param([string[]]$Labels)
+    $exact = Resolve-CanonChoiceLabel -Labels $Labels -Accept @('Cassette Feeding Unit')
     if ($exact) { return $exact }
-    if ($PrintUser) {
-        $named = Resolve-CanonChoiceLabel -Labels $Labels -Accept @($PrintUser)
-        if ($named) { return $named }
-    }
-    if ($KnownOnly) { return $null }
-    $candidates = @()
     foreach ($label in @($Labels)) {
-        if ([string]::IsNullOrWhiteSpace($label)) { continue }
-        if (Test-LogonModeLabel $label) { continue }
-        $candidates += $label
+        $norm = (ConvertTo-CanonLabel $label).ToLowerInvariant()
+        if ($norm.Contains('cassette feeding unit')) { return $label }
     }
-    if (@($candidates).Count -eq 1) { return $candidates[0] }
     return $null
 }
 
@@ -1456,6 +1837,8 @@ function Merge-DeviceLine {
     param(
         [string]$TicketState,
         [string]$TicketDetail,
+        [string]$PropertyState,
+        [string]$PropertyDetail,
         [string]$UiState,
         [string]$UiDetail,
         [bool]$Attempted
@@ -1463,44 +1846,108 @@ function Merge-DeviceLine {
     if ($UiState -eq 'PASS') {
         return @{ State = 'PASS'; Detail = $UiDetail }
     }
-    if ($TicketState -eq 'PASS' -and $UiState -ne 'FAIL') {
+    if ($UiState -eq 'FAIL') {
+        return @{ State = 'FAIL'; Detail = $UiDetail }
+    }
+    if ($PropertyState -eq 'PASS') {
+        return @{ State = 'PASS'; Detail = $PropertyDetail }
+    }
+    if ($TicketState -eq 'PASS' -and -not $Attempted) {
         return @{ State = 'PASS'; Detail = $TicketDetail }
     }
     if ($Attempted -and $UiState) {
         $detail = $UiDetail
+        if (-not $detail) { $detail = $PropertyDetail }
         if (-not $detail) { $detail = $TicketDetail }
         return @{ State = $UiState; Detail = $detail }
     }
-    return @{ State = $TicketState; Detail = $TicketDetail }
+    if ($TicketState -eq 'PASS') {
+        return @{ State = 'PASS'; Detail = $TicketDetail }
+    }
+    $detail = $PropertyDetail
+    if (-not $detail) { $detail = $TicketDetail }
+    $state = 'MANUAL'
+    if ($TicketState) { $state = $TicketState }
+    return @{ State = $state; Detail = $detail }
 }
 
 function New-DeviceUiResult {
     return @{
-        Attempted       = $false
-        SkipReason      = ''
-        CassetteState   = 'MANUAL'
-        CassetteDetail  = ''
-        FinisherState   = 'MANUAL'
-        FinisherDetail  = ''
-        EnterState      = 'MANUAL'
-        EnterDetail     = ''
-        ProfileDetail   = ''
+        Attempted        = $false
+        SkipReason       = ''
+        PaperState       = 'MANUAL'
+        PaperDetail      = ''
+        OutputState      = 'MANUAL'
+        OutputDetail     = ''
+        UserInfoState    = 'MANUAL'
+        UserInfoDetail   = ''
+        UserNameState    = 'MANUAL'
+        UserNameDetail   = ''
+        ProfileDetail    = ''
     }
 }
 
 function New-CanonRead {
     return @{
-        Opened         = $false
-        Error          = ''
-        CassetteSeen   = $false
-        CassetteOn     = $false
-        FinisherSeen   = $false
-        FinisherValue  = ''
-        ProfileValue   = ''
-        UserDialog     = $false
-        UserField      = ''
-        NameToSetSeen  = $false
-        NameToSet      = ''
+        Opened          = $false
+        Error           = ''
+        PaperSeen       = $false
+        PaperValue      = ''
+        OutputSeen      = $false
+        OutputValue     = ''
+        ProfileValue    = ''
+        UserInfoSeen    = $false
+        UserInfoOn      = $false
+        UserDialog      = $false
+        UserNameRadio   = $false
+        UserNameValue   = ''
+        AlwaysConfirm   = $false
+        ConfirmPrinting = $false
+        PinBlank        = $true
+        PinSeen         = $false
+    }
+}
+
+function Read-DefaultValueFromElements {
+    param($Elements, [string]$PrintUser)
+    $targets = Find-CanonDefaultValueTargets $Elements
+    $radioOn = $false
+    if ($targets.UserNameRadio -and (($targets.UserNameRadio.Toggle -eq 'On') -or $targets.UserNameRadio.Selected)) {
+        $radioOn = $true
+    }
+    $name = ''
+    $nameSeen = $false
+    if ($targets.NameEdit) {
+        $nameSeen = $true
+        $name = [string]$targets.NameEdit.Value
+    }
+    $alwaysSeen = [bool]$targets.AlwaysConfirm
+    $always = $false
+    if ($targets.AlwaysConfirm -and $targets.AlwaysConfirm.Toggle -eq 'On') { $always = $true }
+    $confirmSeen = [bool]$targets.ConfirmPrinting
+    $confirm = $false
+    if ($targets.ConfirmPrinting -and $targets.ConfirmPrinting.Toggle -eq 'On') { $confirm = $true }
+    $pinSeen = [bool]$targets.PinEdit
+    $pin = ''
+    if ($targets.PinEdit) { $pin = [string]$targets.PinEdit.Value }
+    $pinBlank = $true
+    if ($pinSeen -and -not [string]::IsNullOrEmpty($pin)) { $pinBlank = $false }
+    $nameOk = $false
+    if ($PrintUser) { $nameOk = (Test-CanonLabelEquals $name $PrintUser) }
+    elseif (-not [string]::IsNullOrWhiteSpace($name)) { $nameOk = $true }
+    $ok = $radioOn -and $nameSeen -and $nameOk -and $alwaysSeen -and $always -and $confirmSeen -and (-not $confirm) -and $pinBlank
+    return @{
+        Ok              = [bool]$ok
+        Radio           = [bool]$radioOn
+        NameSeen        = [bool]$nameSeen
+        Name            = [string]$name
+        AlwaysSeen      = [bool]$alwaysSeen
+        Always          = [bool]$always
+        ConfirmSeen     = [bool]$confirmSeen
+        ConfirmPrinting = [bool]$confirm
+        PinSeen         = [bool]$pinSeen
+        PinBlank        = [bool]$pinBlank
+        Pin             = [string]$pin
     }
 }
 
@@ -1731,9 +2178,9 @@ function Get-ComboDisplay {
     $label = ConvertTo-CanonLabel $Snapshot.Name
     if (-not $label) { return '' }
     $blocked = @(
-        'Output Options', 'Config. Profile', 'Configuration Profile', 'Config Profile',
+        'Output Options', 'Paper Source Options', 'Config. Profile', 'Configuration Profile', 'Config Profile',
         'External Puncher', 'PS Output from Application',
-        'Name to Set for User Name', 'Name Set for User Name'
+        'Name to Set for User Information', 'Name to Set for User Name'
     )
     if (Test-LabelInSet $label $blocked) { return '' }
     return [string]$Snapshot.Name
@@ -2174,215 +2621,123 @@ function Wait-WindowClosed {
 }
 
 function Open-ChildDialog {
-    param($Button, [int]$ProcessId, $Exclude)
+    param($Button, [int]$ProcessId, $Exclude, [string]$TitleLike)
     if (-not $Button) { return $null }
     [void](Invoke-CanonButton -Snapshot $Button -How post)
-    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 8000 -SkipProperties
+    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 8000 -SkipProperties -TitleLike $TitleLike
     if ($dlg) { return $dlg }
     [void](Invoke-CanonButton -Snapshot $Button -How mouse)
-    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties
+    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike
     if ($dlg) { return $dlg }
     [void](Invoke-CanonButton -Snapshot $Button -How invoke)
-    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties)
+    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike)
 }
 
-function Read-CanonNameToSet {
-    param($Elements)
-    $targets = Find-CanonDefaultTargets $Elements
-    $seen = $false
-    $value = ''
-    if ($targets.Combo) {
-        $seen = $true
-        $value = Get-ComboDisplay $targets.Combo
-    }
-    if (-not $value) {
-        foreach ($radio in @($targets.Radios)) {
-            if ($radio.Toggle -eq 'On' -or $radio.Selected) {
-                $seen = $true
-                $value = [string]$radio.Name
-                break
-            }
-        }
-    }
-    if (-not $value -and $targets.Edit) {
-        $seen = $true
-        $value = [string]$targets.Edit.Value
-    } elseif ($targets.Edit -and -not $seen) {
-        $seen = $true
-    }
-    return @{ Seen = [bool]$seen; Value = [string]$value }
-}
-
-function Disable-UserNameLock {
-    param($Elements)
-    $lock = Select-LabeledControl -Elements $Elements -Labels @('Do Not Allow User Name Changes') -ControlType 'CheckBox'
-    if ($lock -and $lock.Toggle -eq 'On') {
-        Write-Remax "Clearing Do Not Allow User Name Changes so the print username can be written."
-        [void](Set-CanonCheck -Snapshot $lock -On $false)
-    }
-}
-
-function Set-NameToSetOnWindow {
+function Set-DefaultValueOnWindow {
     param($Window, [string]$PrintUser)
     $elements = Get-UiaDescendants $Window
-    Disable-UserNameLock $elements
-    $elements = Get-UiaDescendants $Window
-    $targets = Find-CanonDefaultTargets $elements
-    $picked = $false
-    $pickLabel = ''
-    if ($targets.Combo) {
-        $opened = Get-CanonComboChoices $targets.Combo
-        $pickLabel = Resolve-NameToSetLabel -Labels $opened.Labels -PrintUser $PrintUser
-        if ($pickLabel) {
-            $picked = Select-ListedComboItem -Items $opened.Items -Label $pickLabel -Combo $targets.Combo
-            Write-Remax ("Name to Set for User Name choice: " + $pickLabel)
-        } else {
-            $listed = ''
-            if ($opened.Labels) { $listed = ($opened.Labels -join ' | ') }
-            Write-Remax ("Name to Set list had no Enter Name choice: " + $listed)
-            Collapse-CanonCombo $targets.Combo
-        }
+    Write-UiaSummary $elements
+    $targets = Find-CanonDefaultValueTargets $elements
+    $radioOk = $false
+    if ($targets.UserNameRadio) {
+        $radioOk = Select-CanonRadio -Radios @($targets.UserNameRadio) -Label 'User Name'
+        Write-Remax ("User Name radio selected: " + $radioOk)
+    } else {
+        Write-Remax "User Name radio was not found under Name to Set for User Information."
     }
-    if (-not $picked) {
-        $names = @()
-        foreach ($radio in @($targets.Radios)) { $names += [string]$radio.Name }
-        if (@($names).Count -gt 0) {
-            $pickLabel = Resolve-NameToSetLabel -Labels $names -PrintUser $PrintUser -KnownOnly
-            if ($pickLabel) {
-                $picked = Select-CanonRadio -Radios $targets.Radios -Label $pickLabel
-                Write-Remax ("Name to Set radio: " + $pickLabel)
-            }
-        }
+    Start-Sleep -Milliseconds 250
+    $elements = Get-UiaDescendants $Window
+    $targets = Find-CanonDefaultValueTargets $elements
+    $wrote = $false
+    if ($targets.NameEdit) {
+        $wrote = Set-CanonEdit -Snapshot $targets.NameEdit -Text $PrintUser
+        Write-Remax ("User Name text box set: " + $wrote)
+    } else {
+        Write-Remax "Text box under the User Name radio was not found."
     }
     $elements = Get-UiaDescendants $Window
-    $targets = Find-CanonDefaultTargets $elements
-    if ($targets.Edit) {
-        $wrote = Set-CanonEdit -Snapshot $targets.Edit -Text $PrintUser
-        if ($wrote) { $picked = $true }
-    } elseif ($pickLabel) {
-        $chosen = $null
-        foreach ($radio in @($targets.Radios)) {
-            if (Test-CanonLabelEquals $radio.Name $pickLabel) { $chosen = $radio }
-        }
-        if ($chosen) {
-            $edit = Select-RowControl -Elements $elements -Anchor $chosen -ControlType 'Edit' -ToTheRight
-            if ($edit) {
-                $wrote = Set-CanonEdit -Snapshot $edit -Text $PrintUser
-                if ($wrote) { $picked = $true }
-            }
-        }
+    $targets = Find-CanonDefaultValueTargets $elements
+    if ($targets.AlwaysConfirm -and $targets.AlwaysConfirm.Toggle -ne 'On') {
+        [void](Set-CanonCheck -Snapshot $targets.AlwaysConfirm -On $true)
+        Write-Remax "Checked Always Confirm User Information When Performing Secured Print."
     }
-    return $picked
+    if ($targets.ConfirmPrinting -and $targets.ConfirmPrinting.Toggle -eq 'On') {
+        [void](Set-CanonCheck -Snapshot $targets.ConfirmPrinting -On $false)
+        Write-Remax "Cleared Confirm User Name When Printing."
+    }
+    if ($targets.PinEdit -and -not [string]::IsNullOrEmpty([string]$targets.PinEdit.Value)) {
+        [void](Set-CanonEdit -Snapshot $targets.PinEdit -Text '')
+        Write-Remax "Cleared the secured print PIN."
+    }
+    return ($radioOk -and $wrote)
 }
 
-function Update-CanonUserDialogs {
+function Update-DefaultValueDialog {
     param($Window, $Button, [string]$PrintUser, [int]$ProcessId, [switch]$ReadOnly)
-    $result = @{ Opened = $false; UserField = ''; NameToSet = ''; NameToSetSeen = $false }
+    $result = @{ Opened = $false; Read = $null }
     $props = [IntPtr]::Zero
     try { $props = [IntPtr]$Window.Current.NativeWindowHandle } catch { $props = [IntPtr]::Zero }
-    $userDlg = Open-ChildDialog -Button $Button -ProcessId $ProcessId -Exclude @($props)
-    if (-not $userDlg) {
-        Write-Remax "Set User Information dialog did not open."
+    $dlg = Open-ChildDialog -Button $Button -ProcessId $ProcessId -Exclude @($props) -TitleLike '*Default Value Settings*'
+    if (-not $dlg) {
+        Write-Remax "Default Value Settings dialog did not open from Settings..."
+        return $result
+    }
+    $title = ''
+    try { $title = [string]$dlg.Current.Name } catch { $title = '' }
+    if (-not (Test-DefaultValueTitle $title)) {
+        Write-Remax ("Opened window '" + $title + "' is not Default Value Settings. Closing it.")
+        $handle = [IntPtr]::Zero
+        try { $handle = [IntPtr]$dlg.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
+        [void](Click-DialogButton -Window $dlg -Labels @('Cancel', 'Close') -CloseHandle $handle)
         return $result
     }
     $result.Opened = $true
-    Show-CanonWindow $userDlg
-    $userHandle = [IntPtr]::Zero
-    try { $userHandle = [IntPtr]$userDlg.Current.NativeWindowHandle } catch { $userHandle = [IntPtr]::Zero }
-    $elements = @()
-    try { $elements = Get-UiaDescendants $userDlg } catch { $elements = @() }
-    Write-UiaSummary $elements
-    $userTargets = Find-CanonUserDialogTargets $elements
-    $nestedHandle = [IntPtr]::Zero
-    $openedDefault = $false
-    if ($userTargets.DefaultButton) {
-        $nested = Open-ChildDialog -Button $userTargets.DefaultButton -ProcessId $ProcessId -Exclude @($props, $userHandle)
-            if ($nested) {
-            $openedDefault = $true
-            Show-CanonWindow $nested
-            try { $nestedHandle = [IntPtr]$nested.Current.NativeWindowHandle } catch { $nestedHandle = [IntPtr]::Zero }
-            if ($ReadOnly) {
-                $nestedElements = @()
-                try { $nestedElements = Get-UiaDescendants $nested } catch { $nestedElements = @() }
-                Write-UiaSummary $nestedElements
-                $info = Read-CanonNameToSet $nestedElements
-                $result.NameToSetSeen = [bool]$info.Seen
-                $result.NameToSet = [string]$info.Value
-                [void](Click-DialogButton -Window $nested -Labels @('Cancel', 'Close') -CloseHandle $nestedHandle)
-            } else {
-                $picked = Set-NameToSetOnWindow -Window $nested -PrintUser $PrintUser
-                if ($picked) {
-                    [void](Click-DialogButton -Window $nested -Labels @('OK') -CloseHandle $nestedHandle)
-                } else {
-                    [void](Click-DialogButton -Window $nested -Labels @('Cancel', 'Close') -CloseHandle $nestedHandle)
-                }
-            }
-            [void](Wait-WindowClosed -Handle $nestedHandle -TimeoutMs 5000)
-        } else {
-            Write-Remax "Default Value Settings dialog did not open."
-        }
-    }
-    try { $elements = Get-UiaDescendants $userDlg } catch { $elements = @() }
+    Show-CanonWindow $dlg
+    $handle = [IntPtr]::Zero
+    try { $handle = [IntPtr]$dlg.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
+    Write-Remax ("Default Value Settings opened (" + $title + ").")
     if (-not $ReadOnly) {
-        Disable-UserNameLock $elements
-        if (-not $openedDefault) {
-            $inlinePicked = Set-NameToSetOnWindow -Window $userDlg -PrintUser $PrintUser
-            if ($inlinePicked) { Write-Remax "Name to Set controls on the user dialog were written." }
-        }
-        try { $elements = Get-UiaDescendants $userDlg } catch { $elements = @() }
+        [void](Set-DefaultValueOnWindow -Window $dlg -PrintUser $PrintUser)
     }
-    $inline = Read-CanonNameToSet $elements
-    if ($inline.Seen -and -not $result.NameToSetSeen) {
-        $result.NameToSetSeen = $true
-        $result.NameToSet = [string]$inline.Value
-    }
-    $userTargets = Find-CanonUserDialogTargets $elements
-    if ($userTargets.UserNameEdit) {
-        if (-not $ReadOnly) {
-            [void](Set-CanonEdit -Snapshot $userTargets.UserNameEdit -Text $PrintUser)
-            try { $elements = Get-UiaDescendants $userDlg } catch { $elements = @() }
-            $userTargets = Find-CanonUserDialogTargets $elements
-        }
-        if ($userTargets.UserNameEdit) { $result.UserField = [string]$userTargets.UserNameEdit.Value }
-    } else {
-        Write-Remax "User Name field was not found."
-    }
+    $elements = @()
+    try { $elements = Get-UiaDescendants $dlg } catch { $elements = @() }
+    Write-UiaSummary $elements
+    $result.Read = Read-DefaultValueFromElements -Elements $elements -PrintUser $PrintUser
     if ($ReadOnly) {
-        [void](Click-DialogButton -Window $userDlg -Labels @('Cancel', 'Close') -CloseHandle $userHandle)
+        [void](Click-DialogButton -Window $dlg -Labels @('Cancel', 'Close') -CloseHandle $handle)
     } else {
-        [void](Click-DialogButton -Window $userDlg -Labels @('OK') -CloseHandle $userHandle)
+        [void](Click-DialogButton -Window $dlg -Labels @('OK') -CloseHandle $handle)
     }
-    [void](Wait-WindowClosed -Handle $userHandle -TimeoutMs 5000)
+    [void](Wait-WindowClosed -Handle $handle -TimeoutMs 5000)
     return $result
 }
 
-function Select-UiaTab {
-    param($Window, [string]$TabName)
-    $cond = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::TabItem
-    )
-    $tabs = $null
-    try { $tabs = $Window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond) } catch { return $false }
-    $names = @()
-    foreach ($tab in @($tabs)) {
-        if (-not $tab) { continue }
-        $name = ''
-        try { $name = [string]$tab.Current.Name } catch { $name = '' }
-        $names += $name
-        if (-not (Test-CanonLabelEquals $name $TabName)) { continue }
-        try {
-            $pattern = $null
-            if ($tab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
-                $pattern.Select()
-                return $true
-            }
-        } catch {
-            Write-Remax ("Device Settings tab select failed: " + $_.Exception.Message)
-        }
+function Set-CanonComboToLabel {
+    param($Combo, [string]$Kind)
+    if (-not $Combo) { return $false }
+    $want = 'Inner Finisher E1'
+    if ($Kind -eq 'paper') { $want = 'Cassette Feeding Unit' }
+    $current = Get-ComboDisplay $Combo
+    if ($current) {
+        $already = $null
+        if ($Kind -eq 'paper') { $already = Resolve-PaperSourceLabel -Labels @($current) }
+        else { $already = Resolve-FinisherLabel -Labels @($current) }
+        if ($already) { return $true }
     }
-    Write-Remax ("Tabs seen: " + ($names -join ' | '))
-    return $false
+    $opened = Get-CanonComboChoices $Combo
+    $pick = $null
+    if ($Kind -eq 'paper') { $pick = Resolve-PaperSourceLabel -Labels $opened.Labels }
+    else { $pick = Resolve-FinisherLabel -Labels $opened.Labels }
+    if (-not $pick) {
+        $listed = ''
+        if ($opened.Labels) { $listed = ($opened.Labels -join ' | ') }
+        Write-Remax ("Combo has no '" + $want + "'. Choices: " + $listed)
+        Collapse-CanonCombo $Combo
+        return $false
+    }
+    $ok = Select-ListedComboItem -Items $opened.Items -Label $pick -Combo $Combo
+    Write-Remax ("Selected '" + $pick + "': " + $ok)
+    return [bool]$ok
 }
 
 function Set-CanonDeviceOnWindow {
@@ -2408,27 +2763,18 @@ function Set-CanonDeviceOnWindow {
             Write-Remax "Config. Profile list had no iR-ADV C5235/5240 entry."
         }
     }
-    if ($targets.Cassette) {
-        $ok = Set-CanonCheck -Snapshot $targets.Cassette -On $true
-        Write-Remax ("Cassette Feeding Unit set On: " + $ok)
+    if ($targets.PaperCombo) {
+        $ok = Set-CanonComboToLabel -Combo $targets.PaperCombo -Kind 'paper'
+        Write-Remax ("Paper Source Options set to Cassette Feeding Unit: " + $ok)
         Start-Sleep -Milliseconds 300
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
     } else {
-        Write-Remax "Cassette Feeding Unit checkbox was not found."
+        Write-Remax "Paper Source Options combo was not found."
     }
     if ($targets.OutputCombo) {
-        $opened = Get-CanonComboChoices $targets.OutputCombo
-        $pick = Resolve-FinisherLabel $opened.Labels
-        if ($pick) {
-            $ok = Select-ListedComboItem -Items $opened.Items -Label $pick -Combo $targets.OutputCombo
-            Write-Remax ("Output Options set to " + $pick + ": " + $ok)
-        } else {
-            $listed = ''
-            if ($opened.Labels) { $listed = ($opened.Labels -join ' | ') }
-            Write-Remax ("Output Options has no Inner Finisher E1. Choices: " + $listed)
-            Collapse-CanonCombo $targets.OutputCombo
-        }
+        $ok = Set-CanonComboToLabel -Combo $targets.OutputCombo -Kind 'output'
+        Write-Remax ("Output Options set to Inner Finisher E1: " + $ok)
     } else {
         Write-Remax "Output Options combo was not found."
     }
@@ -2440,10 +2786,13 @@ function Set-CanonDeviceOnWindow {
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
     }
+    if (-not $targets.UserInfo) {
+        Write-Remax "Set User Information checkbox was not found."
+    }
     if ($targets.UserSettings) {
-        [void](Update-CanonUserDialogs -Window $Window -Button $targets.UserSettings -PrintUser $PrintUser -ProcessId $ProcessId)
+        [void](Update-DefaultValueDialog -Window $Window -Button $targets.UserSettings -PrintUser $PrintUser -ProcessId $ProcessId)
     } else {
-        Write-Remax "Set User Information Settings button was not found."
+        Write-Remax "Settings... button beside Set User Information was not found."
     }
 }
 
@@ -2462,23 +2811,35 @@ function Read-CanonDeviceFromWindow {
     try { $elements = Get-UiaDescendants $Window } catch { $elements = @() }
     Write-UiaSummary $elements
     $targets = Find-CanonDeviceTargets $elements
-    if ($targets.Cassette) {
-        $read.CassetteSeen = $true
-        $read.CassetteOn = ($targets.Cassette.Toggle -eq 'On')
+    if ($targets.PaperCombo) {
+        $read.PaperSeen = $true
+        $read.PaperValue = Get-ComboDisplay $targets.PaperCombo
     }
     if ($targets.OutputCombo) {
-        $read.FinisherSeen = $true
-        $read.FinisherValue = Get-ComboDisplay $targets.OutputCombo
+        $read.OutputSeen = $true
+        $read.OutputValue = Get-ComboDisplay $targets.OutputCombo
     }
     if ($targets.Profile) {
         $read.ProfileValue = Get-ComboDisplay $targets.Profile
     }
+    if ($targets.UserInfo) {
+        $read.UserInfoSeen = $true
+        $read.UserInfoOn = ($targets.UserInfo.Toggle -eq 'On')
+    }
     if ($targets.UserSettings) {
-        $info = Update-CanonUserDialogs -Window $Window -Button $targets.UserSettings -PrintUser $PrintUser -ProcessId $ProcessId -ReadOnly
+        $info = Update-DefaultValueDialog -Window $Window -Button $targets.UserSettings -PrintUser $PrintUser -ProcessId $ProcessId -ReadOnly
         $read.UserDialog = [bool]$info.Opened
-        $read.UserField = [string]$info.UserField
-        $read.NameToSetSeen = [bool]$info.NameToSetSeen
-        $read.NameToSet = [string]$info.NameToSet
+        if ($info.Read) {
+            $read.UserNameRadio = [bool]$info.Read.Radio
+            $read.UserNameValue = [string]$info.Read.Name
+            $read.AlwaysConfirm = [bool]$info.Read.Always
+            $read.ConfirmPrinting = [bool]$info.Read.ConfirmPrinting
+            $read.PinBlank = [bool]$info.Read.PinBlank
+            $read.PinSeen = [bool]$info.Read.PinSeen
+            $read.NameSeen = [bool]$info.Read.NameSeen
+            $read.AlwaysSeen = [bool]$info.Read.AlwaysSeen
+            $read.ConfirmSeen = [bool]$info.Read.ConfirmSeen
+        }
     }
     return $read
 }
@@ -2493,59 +2854,83 @@ function Convert-CanonReadToResult {
         $msg = $OpenError
         if (-not $msg -and $Read) { $msg = [string]$Read.Error }
         if (-not $msg) { $msg = 'Printer properties did not open.' }
-        $result.CassetteDetail = $msg
-        $result.FinisherDetail = $msg
-        $result.EnterDetail = $msg
+        $result.PaperDetail = $msg
+        $result.OutputDetail = $msg
+        $result.UserInfoDetail = $msg
+        $result.UserNameDetail = $msg
         return $result
     }
-    if ($Read.Error -and -not $Read.CassetteSeen -and -not $Read.FinisherSeen) {
-        $result.CassetteDetail = [string]$Read.Error
-        $result.FinisherDetail = [string]$Read.Error
-        $result.EnterDetail = [string]$Read.Error
+    if ($Read.Error -and -not $Read.PaperSeen -and -not $Read.OutputSeen) {
+        $result.PaperDetail = [string]$Read.Error
+        $result.OutputDetail = [string]$Read.Error
+        $result.UserInfoDetail = [string]$Read.Error
+        $result.UserNameDetail = [string]$Read.Error
         return $result
     }
-    if ($Read.CassetteSeen -and $Read.CassetteOn) {
-        $result.CassetteState = 'PASS'
-        $result.CassetteDetail = 'Device Settings readback: Cassette Feeding Unit is On.'
-    } elseif ($Read.CassetteSeen) {
-        $result.CassetteState = $wrongState
-        $result.CassetteDetail = 'Device Settings readback: Cassette Feeding Unit is Off.'
-    } else {
-        $result.CassetteDetail = 'Device Settings dialog had no Cassette Feeding Unit checkbox.'
+    $paperOk = $false
+    if ($Read.PaperValue) {
+        $match = Resolve-PaperSourceLabel -Labels @([string]$Read.PaperValue)
+        if ($match) { $paperOk = $true }
     }
-    $finisherOk = $false
-    if ($Read.FinisherValue) {
-        $match = Resolve-FinisherLabel -Labels @([string]$Read.FinisherValue)
-        if ($match) { $finisherOk = $true }
-    }
-    if ($Read.FinisherSeen -and $finisherOk) {
-        $result.FinisherState = 'PASS'
-        $result.FinisherDetail = 'Device Settings readback: Output Options is Inner Finisher E1.'
-    } elseif ($Read.FinisherSeen) {
-        $result.FinisherState = $wrongState
-        $shown = [string]$Read.FinisherValue
+    if ($Read.PaperSeen -and $paperOk) {
+        $result.PaperState = 'PASS'
+        $result.PaperDetail = 'Device Settings readback: Paper Source Options is Cassette Feeding Unit.'
+    } elseif ($Read.PaperSeen) {
+        $result.PaperState = $wrongState
+        $shown = [string]$Read.PaperValue
         if (-not $shown) { $shown = 'blank' }
-        $result.FinisherDetail = 'Device Settings readback: Output Options is ' + $shown + '.'
+        $result.PaperDetail = 'Device Settings readback: Paper Source Options is ' + $shown + '.'
     } else {
-        $result.FinisherDetail = 'Device Settings dialog had no Output Options combo.'
+        $result.PaperDetail = 'Device Settings dialog had no Paper Source Options combo.'
     }
-    $enterOk = Test-EnterNameConfigured -UserField $Read.UserField -NameToSet $Read.NameToSet -PrintUser $PrintUser -SawNameToSet $Read.NameToSetSeen
-    if ($enterOk) {
-        $result.EnterState = 'PASS'
-        $who = [string]$Read.UserField
-        $mode = ConvertTo-CanonLabel $Read.NameToSet
-        $result.EnterDetail = 'Device Settings readback: User Name is ' + $who + ' and Name to Set for User Name is ' + $mode + '.'
-    } elseif (-not $Read.UserDialog) {
-        $result.EnterDetail = 'Set User Information dialog did not open.'
-    } elseif (-not $Read.NameToSetSeen) {
-        $result.EnterDetail = 'Default Value Settings did not show Name to Set for User Name.'
+    $outputOk = $false
+    if ($Read.OutputValue) {
+        $match = Resolve-FinisherLabel -Labels @([string]$Read.OutputValue)
+        if ($match) { $outputOk = $true }
+    }
+    if ($Read.OutputSeen -and $outputOk) {
+        $result.OutputState = 'PASS'
+        $result.OutputDetail = 'Device Settings readback: Output Options is Inner Finisher E1.'
+    } elseif ($Read.OutputSeen) {
+        $result.OutputState = $wrongState
+        $shown = [string]$Read.OutputValue
+        if (-not $shown) { $shown = 'blank' }
+        $result.OutputDetail = 'Device Settings readback: Output Options is ' + $shown + '.'
     } else {
-        $result.EnterState = $wrongState
-        $who = [string]$Read.UserField
-        if (-not $who) { $who = 'blank' }
-        $mode = ConvertTo-CanonLabel $Read.NameToSet
-        if (-not $mode) { $mode = 'blank' }
-        $result.EnterDetail = 'Device Settings readback: User Name is ' + $who + ' and Name to Set for User Name is ' + $mode + '.'
+        $result.OutputDetail = 'Device Settings dialog had no Output Options combo.'
+    }
+    if ($Read.UserInfoSeen -and $Read.UserInfoOn) {
+        $result.UserInfoState = 'PASS'
+        $result.UserInfoDetail = 'Device Settings readback: Set User Information is on.'
+    } elseif ($Read.UserInfoSeen) {
+        $result.UserInfoState = $wrongState
+        $result.UserInfoDetail = 'Device Settings readback: Set User Information is off.'
+    } else {
+        $result.UserInfoDetail = 'Device Settings dialog had no Set User Information checkbox.'
+    }
+    $who = [string]$PrintUser
+    if (-not $who) { $who = [string]$Read.UserNameValue }
+    if (-not $who) { $who = 'blank' }
+    $userOk = $false
+    if ($Read.UserDialog -and $Read.UserNameRadio -and $Read.NameSeen -and $Read.AlwaysSeen -and $Read.AlwaysConfirm -and $Read.ConfirmSeen -and (-not $Read.ConfirmPrinting) -and $Read.PinBlank) {
+        if ($PrintUser) {
+            if (Test-CanonLabelEquals $Read.UserNameValue $PrintUser) { $userOk = $true }
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$Read.UserNameValue)) {
+            $userOk = $true
+        }
+    }
+    if ($userOk) {
+        $result.UserNameState = 'PASS'
+        $result.UserNameDetail = 'Device Settings readback: User Name = ' + $Read.UserNameValue
+    } elseif (-not $Read.UserDialog) {
+        $result.UserNameDetail = 'Default Value Settings did not open from Settings...'
+    } else {
+        $result.UserNameState = $wrongState
+        $shown = [string]$Read.UserNameValue
+        if (-not $shown) { $shown = 'blank' }
+        $radio = 'off'
+        if ($Read.UserNameRadio) { $radio = 'on' }
+        $result.UserNameDetail = 'Device Settings readback: User Name radio ' + $radio + ', text ' + $shown + '. Expected User Name = ' + $who + ' (Always Confirm on, Confirm User Name When Printing off, PIN blank).'
     }
     if ($Read.ProfileValue) {
         $result.ProfileDetail = 'Config. Profile read back as ' + $Read.ProfileValue + '.'
@@ -2603,9 +2988,10 @@ function Invoke-CanonDeviceAutomation {
     } catch {
         $result.Attempted = $true
         $msg = "UI Automation could not load: " + $_.Exception.Message
-        $result.CassetteDetail = $msg
-        $result.FinisherDetail = $msg
-        $result.EnterDetail = $msg
+        $result.PaperDetail = $msg
+        $result.OutputDetail = $msg
+        $result.UserInfoDetail = $msg
+        $result.UserNameDetail = $msg
         return $result
     }
     if ($Action -eq 'apply' -and $env:REMAX_DEVICE_DAT) {
@@ -2663,35 +3049,284 @@ function Invoke-CanonDeviceAutomation {
     return (Convert-CanonReadToResult -Read $read -PrintUser $PrintUser -Action $Action -OpenError $openError)
 }
 
+function Get-PropertyRowName {
+    param($Row)
+    if ($null -eq $Row) { return '' }
+    if ($Row -is [System.Collections.IDictionary]) {
+        if ($Row.Contains('PropertyName')) { return [string]$Row['PropertyName'] }
+        if ($Row.Contains('Name')) { return [string]$Row['Name'] }
+        return ''
+    }
+    try { return [string]$Row.PropertyName } catch { return '' }
+}
+
+function Get-PropertyRowValue {
+    param($Row)
+    if ($null -eq $Row) { return '' }
+    if ($Row -is [System.Collections.IDictionary]) {
+        if ($Row.Contains('Value')) { return [string]$Row['Value'] }
+        return ''
+    }
+    try {
+        if ($null -eq $Row.Value) { return '' }
+        return [string]$Row.Value
+    } catch { return '' }
+}
+
+function Find-NamedPrinterProperty {
+    param($Rows, [string[]]$Names)
+    foreach ($want in @($Names)) {
+        foreach ($row in @($Rows)) {
+            if ((Get-PropertyRowName $row) -eq $want) { return $row }
+        }
+    }
+    return $null
+}
+
+function Test-PropertyReadback {
+    param([string]$Value, [string[]]$Accept)
+    foreach ($item in @($Accept)) {
+        if ([string]::IsNullOrWhiteSpace([string]$item)) { continue }
+        if ($Value -eq [string]$item) { return $true }
+        if (Test-CanonLabelEquals $Value ([string]$item)) { return $true }
+    }
+    return $false
+}
+
+function Write-PrinterPropertyInventory {
+    param($Rows)
+    $count = @($Rows).Count
+    if ($count -eq 0) {
+        Write-Remax "Get-PrinterProperty returned no properties. UI Automation is the fallback for device options."
+        return
+    }
+    Write-Remax ("Get-PrinterProperty returned " + $count + " properties.")
+    foreach ($row in @($Rows)) {
+        $name = Get-PropertyRowName $row
+        $value = Get-PropertyRowValue $row
+        if ($value.Length -gt 160) { $value = $value.Substring(0, 160) + '...' }
+        Write-Remax ("PrinterProperty " + $name + " = " + $value)
+    }
+}
+
+function Write-PrinterDriverDataInventory {
+    $root = Join-Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers' $script:PrinterName
+    $data = Join-Path $root 'PrinterDriverData'
+    if (Test-Path -LiteralPath $data) {
+        try {
+            $key = Get-Item -LiteralPath $data
+            $names = @($key.GetValueNames())
+            Write-Remax ("PrinterDriverData value names (read only, not written): " + ($names -join ', '))
+        } catch {
+            Write-Remax ("PrinterDriverData could not be listed: " + $_.Exception.Message)
+        }
+    } else {
+        Write-Remax ("PrinterDriverData key is not present: " + $data)
+    }
+    if (Test-Path -LiteralPath $root) {
+        try {
+            $printerKey = Get-Item -LiteralPath $root
+            $listed = @()
+            foreach ($value in @($printerKey.GetValueNames())) {
+                if ($value -match 'DevMode') { $listed += [string]$value }
+            }
+            if ($listed.Count -gt 0) {
+                Write-Remax ("Printer key DevMode value names (read only, not written): " + ($listed -join ', '))
+            } else {
+                Write-Remax "Printer key has no DevMode value name to list."
+            }
+        } catch {
+            Write-Remax ("Printer key could not be listed: " + $_.Exception.Message)
+        }
+    }
+}
+
+function Read-OnePrinterProperty {
+    param([string]$Name)
+    try {
+        $row = Get-PrinterProperty -PrinterName $script:PrinterName -PropertyName $Name -ErrorAction Stop
+        return (Get-PropertyRowValue $row)
+    } catch {
+        return $null
+    }
+}
+
+function Try-ApplyPrinterProperty {
+    param($Row, [string[]]$Accept, [string]$Action)
+    $name = Get-PropertyRowName $Row
+    $current = Get-PropertyRowValue $Row
+    if (Test-PropertyReadback -Value $current -Accept $Accept) {
+        return @{ Ok = $true; Value = $current; Detail = ("Get-PrinterProperty " + $name + " read back '" + $current + "'.") }
+    }
+    if ($Action -ne 'apply') {
+        return @{ Ok = $false; Value = $current; Detail = ("Get-PrinterProperty " + $name + " is '" + $current + "'. UI Automation is the fallback.") }
+    }
+    foreach ($candidate in @($Accept)) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidate)) { continue }
+        try {
+            Set-PrinterProperty -PrinterName $script:PrinterName -PropertyName $name -Value $candidate -ErrorAction Stop
+        } catch {
+            Write-Remax ("Set-PrinterProperty " + $name + " = " + $candidate + " failed: " + $_.Exception.Message)
+            continue
+        }
+        $read = Read-OnePrinterProperty $name
+        if ($null -ne $read -and (Test-PropertyReadback -Value ([string]$read) -Accept @($candidate))) {
+            return @{ Ok = $true; Value = [string]$read; Detail = ("Set-PrinterProperty " + $name + " read back '" + $read + "'.") }
+        }
+        Write-Remax ("Set-PrinterProperty " + $name + " = " + $candidate + " did not read back.")
+    }
+    try {
+        Set-PrinterProperty -PrinterName $script:PrinterName -PropertyName $name -Value $current -ErrorAction Stop
+        Write-Remax ("Restored " + $name + " to '" + $current + "'.")
+    } catch {
+        Write-Remax ("Could not restore " + $name + ": " + $_.Exception.Message)
+    }
+    return @{ Ok = $false; Value = $current; Detail = ("Get-PrinterProperty " + $name + " did not keep a recorded value. UI Automation is the fallback.") }
+}
+
+function New-PropertyResult {
+    $miss = 'Get-PrinterProperty did not expose this setting. UI Automation is the fallback.'
+    return @{
+        PaperState     = 'MANUAL'
+        PaperDetail    = $miss
+        OutputState    = 'MANUAL'
+        OutputDetail   = $miss
+        UserInfoState  = 'MANUAL'
+        UserInfoDetail = $miss
+        UserNameState  = 'MANUAL'
+        UserNameDetail = $miss
+    }
+}
+
+function Invoke-CanonPropertySettings {
+    param([string]$PrintUser, [string]$Action)
+    $result = New-PropertyResult
+    $rows = @()
+    try {
+        $rows = @(Get-PrinterProperty -PrinterName $script:PrinterName -ErrorAction Stop)
+    } catch {
+        Write-Remax ("Get-PrinterProperty failed: " + $_.Exception.Message)
+        $result.PaperDetail = "Get-PrinterProperty failed: " + $_.Exception.Message
+        $result.OutputDetail = $result.PaperDetail
+        $result.UserInfoDetail = $result.PaperDetail
+        $result.UserNameDetail = $result.PaperDetail
+        try { Write-PrinterDriverDataInventory } catch { }
+        return $result
+    }
+    Write-PrinterPropertyInventory $rows
+    try { Write-PrinterDriverDataInventory } catch {
+        Write-Remax ("Driver data inventory failed: " + $_.Exception.Message)
+    }
+    $paperNames = @('Config:CNSrcOption', 'Config:PaperSourceOptions', 'Config:CNPaperSource', 'Config:PaperSource')
+    $outputNames = @('Config:CNFinisher', 'Config:OutputOptions', 'Config:CNOutputOption')
+    $userInfoNames = @('Config:CNSetUserInfo', 'Config:SetUserInformation', 'Config:CNUserInformation')
+    $userNameNames = @('Config:CNUserName', 'Config:UserName', 'Config:CNSecureUserName')
+    $paperValues = @('Cassette Feeding Unit', 'OptCas2')
+    $outputValues = @('Inner Finisher E1', 'IFINE1')
+    $userInfoValues = @('True', '1', 'On')
+    $paper = Find-NamedPrinterProperty -Rows $rows -Names $paperNames
+    if ($paper) {
+        $applied = Try-ApplyPrinterProperty -Row $paper -Accept $paperValues -Action $Action
+        if ($applied.Ok) {
+            $result.PaperState = 'PASS'
+            $result.PaperDetail = 'Paper Source Options via ' + $applied.Detail
+        } else {
+            $result.PaperDetail = $applied.Detail
+        }
+    } else {
+        $result.PaperDetail = 'Get-PrinterProperty has no Paper Source Options property (' + ($paperNames -join ', ') + '). UI Automation is the fallback.'
+    }
+    $output = Find-NamedPrinterProperty -Rows $rows -Names $outputNames
+    if ($output) {
+        $applied = Try-ApplyPrinterProperty -Row $output -Accept $outputValues -Action $Action
+        if ($applied.Ok) {
+            $result.OutputState = 'PASS'
+            $result.OutputDetail = 'Output Options via ' + $applied.Detail
+        } else {
+            $result.OutputDetail = $applied.Detail
+        }
+    } else {
+        $result.OutputDetail = 'Get-PrinterProperty has no Output Options property (' + ($outputNames -join ', ') + '). UI Automation is the fallback.'
+    }
+    $userInfo = Find-NamedPrinterProperty -Rows $rows -Names $userInfoNames
+    if ($userInfo) {
+        $applied = Try-ApplyPrinterProperty -Row $userInfo -Accept $userInfoValues -Action $Action
+        if ($applied.Ok) {
+            $result.UserInfoState = 'PASS'
+            $result.UserInfoDetail = 'Set User Information via ' + $applied.Detail
+        } else {
+            $result.UserInfoDetail = $applied.Detail
+        }
+    } else {
+        $result.UserInfoDetail = 'Get-PrinterProperty has no Set User Information property (' + ($userInfoNames -join ', ') + '). UI Automation is the fallback.'
+    }
+    $userName = Find-NamedPrinterProperty -Rows $rows -Names $userNameNames
+    if ($userName -and $PrintUser) {
+        $applied = Try-ApplyPrinterProperty -Row $userName -Accept @($PrintUser) -Action $Action
+        if ($applied.Ok) {
+            $result.UserNameState = 'PASS'
+            $result.UserNameDetail = 'User Name = ' + $applied.Value
+        } else {
+            $result.UserNameDetail = $applied.Detail
+        }
+    } elseif (-not $PrintUser) {
+        $result.UserNameDetail = 'No print username to compare with Get-PrinterProperty.'
+    } else {
+        $result.UserNameDetail = 'Get-PrinterProperty has no User Name property (' + ($userNameNames -join ', ') + '). UI Automation is the fallback.'
+    }
+    return $result
+}
+
+function Test-PropertyResultComplete {
+    param($Property)
+    if (-not $Property) { return $false }
+    if ($Property.PaperState -ne 'PASS') { return $false }
+    if ($Property.OutputState -ne 'PASS') { return $false }
+    if ($Property.UserInfoState -ne 'PASS') { return $false }
+    if ($Property.UserNameState -ne 'PASS') { return $false }
+    return $true
+}
+
 function Apply-DeviceUiResult {
-    param($Status, $Ui, [string]$PrintUser)
-    if (-not $Ui) { return }
-    $pairs = New-Object System.Collections.Generic.List[object]
-    [void]$pairs.Add((@{ Label = 'CASSETTE'; UiState = [string]$Ui.CassetteState; UiDetail = [string]$Ui.CassetteDetail }))
-    [void]$pairs.Add((@{ Label = 'FINISHER'; UiState = [string]$Ui.FinisherState; UiDetail = [string]$Ui.FinisherDetail }))
-    foreach ($pair in $pairs) {
-        $merged = Merge-DeviceLine -TicketState $Status[$pair.Label].State -TicketDetail $Status[$pair.Label].Detail -UiState $pair.UiState -UiDetail $pair.UiDetail -Attempted ([bool]$Ui.Attempted)
-        if ($Ui.SkipReason -and $merged.State -ne 'PASS' -and -not $Ui.Attempted) {
+    param($Status, $Ui, $Property, [string]$PrintUser)
+    $rows = @(
+        @{ Label = 'PAPER SOURCE'; PropState = ''; PropDetail = ''; UiState = ''; UiDetail = '' }
+        @{ Label = 'OUTPUT'; PropState = ''; PropDetail = ''; UiState = ''; UiDetail = '' }
+        @{ Label = 'USER INFO'; PropState = ''; PropDetail = ''; UiState = ''; UiDetail = '' }
+        @{ Label = 'USER NAME'; PropState = ''; PropDetail = ''; UiState = ''; UiDetail = '' }
+    )
+    if ($Property) {
+        $rows[0].PropState = [string]$Property.PaperState
+        $rows[0].PropDetail = [string]$Property.PaperDetail
+        $rows[1].PropState = [string]$Property.OutputState
+        $rows[1].PropDetail = [string]$Property.OutputDetail
+        $rows[2].PropState = [string]$Property.UserInfoState
+        $rows[2].PropDetail = [string]$Property.UserInfoDetail
+        $rows[3].PropState = [string]$Property.UserNameState
+        $rows[3].PropDetail = [string]$Property.UserNameDetail
+    }
+    if ($Ui) {
+        $rows[0].UiState = [string]$Ui.PaperState
+        $rows[0].UiDetail = [string]$Ui.PaperDetail
+        $rows[1].UiState = [string]$Ui.OutputState
+        $rows[1].UiDetail = [string]$Ui.OutputDetail
+        $rows[2].UiState = [string]$Ui.UserInfoState
+        $rows[2].UiDetail = [string]$Ui.UserInfoDetail
+        $rows[3].UiState = [string]$Ui.UserNameState
+        $rows[3].UiDetail = [string]$Ui.UserNameDetail
+    }
+    $attempted = $false
+    if ($Ui) { $attempted = [bool]$Ui.Attempted }
+    foreach ($row in $rows) {
+        if (-not $Status.ContainsKey($row.Label)) { continue }
+        $merged = Merge-DeviceLine -TicketState $Status[$row.Label].State -TicketDetail $Status[$row.Label].Detail -PropertyState $row.PropState -PropertyDetail $row.PropDetail -UiState $row.UiState -UiDetail $row.UiDetail -Attempted $attempted
+        if ($Ui -and $Ui.SkipReason -and $merged.State -ne 'PASS' -and -not $attempted) {
             $merged.Detail = $merged.Detail + " Device Settings automation skipped (" + $Ui.SkipReason + ")."
         }
-        $Status[$pair.Label].State = $merged.State
-        $Status[$pair.Label].Detail = $merged.Detail
+        $Status[$row.Label].State = $merged.State
+        $Status[$row.Label].Detail = $merged.Detail
     }
-    if ($Ui.EnterState -eq 'PASS') {
-        $Status['ENTER NAME'].State = 'PASS'
-        $Status['ENTER NAME'].Detail = [string]$Ui.EnterDetail
-    } elseif ($Ui.Attempted) {
-        $Status['ENTER NAME'].State = [string]$Ui.EnterState
-        $detail = [string]$Ui.EnterDetail
-        if (-not $detail) { $detail = Get-EnterNameDetail $PrintUser }
-        $Status['ENTER NAME'].Detail = $detail
-    } else {
-        $Status['ENTER NAME'].State = 'MANUAL'
-        $why = ''
-        if ($Ui.SkipReason) { $why = "Device Settings automation skipped (" + $Ui.SkipReason + "). " }
-        $Status['ENTER NAME'].Detail = $why + (Get-EnterNameDetail $PrintUser)
-    }
-    if ($Ui.ProfileDetail -and $Status['DRIVER'].State -eq 'PASS') {
+    if ($Ui -and $Ui.ProfileDetail -and $Status['DRIVER'].State -eq 'PASS') {
         $Status['DRIVER'].Detail = $Status['DRIVER'].Detail + " " + $Ui.ProfileDetail
     }
 }
@@ -2700,7 +3335,7 @@ function Apply-DeviceUiResult {
 function Apply-PublishedHardware {
     $result = @{
         CassetteState  = 'MANUAL'
-        CassetteDetail = 'Cassette Feeding Unit = On. This driver did not publish print-ticket option OptCas2. Set it in Printer properties, Device Settings.'
+        CassetteDetail = 'Paper Source Options = Cassette Feeding Unit. This driver did not publish print-ticket option OptCas2. Set it in Printer properties, Device Settings.'
         FinisherState  = 'MANUAL'
         FinisherDetail = 'Output Options = Inner Finisher E1. This driver did not publish print-ticket option IFINE1. Set it in Printer properties, Device Settings.'
     }
@@ -2709,7 +3344,7 @@ function Apply-PublishedHardware {
         $caps = Get-QueueXml -Capabilities -WriteAccess
     } catch {
         Write-Remax ("Print capabilities were not readable: " + $_.Exception.Message)
-        $result.CassetteDetail = 'Cassette Feeding Unit = On. Print capabilities could not be read. Set Device Settings by hand.'
+        $result.CassetteDetail = 'Paper Source Options = Cassette Feeding Unit. Print capabilities could not be read. Set Device Settings by hand.'
         $result.FinisherDetail = 'Output Options = Inner Finisher E1. Print capabilities could not be read. Set Device Settings by hand.'
         return $result
     }
@@ -2741,15 +3376,19 @@ function Apply-PublishedHardware {
     }
     $readback = ''
     try { $readback = Get-QueueXml -WriteAccess } catch { $readback = '' }
-    if ($cassette -and (Test-TicketHasOption -TicketXml $readback -OptionLocalName 'OptCas2')) {
+    $cassetteLocal = ''
+    if ($cassette) { $cassetteLocal = Get-XmlLocalName $cassette.Option }
+    if ($cassette -and $cassetteLocal -and (Test-TicketHasOption -TicketXml $readback -OptionLocalName $cassetteLocal)) {
         $result.CassetteState = 'PASS'
-        $result.CassetteDetail = "Default print ticket option OptCas2 (Cassette Feeding Unit ON), " + $cassette.How
+        $result.CassetteDetail = "Default print ticket option " + (Get-XmlLocalName $cassette.Option) + " (Paper Source Options = Cassette Feeding Unit), " + $cassette.How
     } elseif ($cassette) {
-        $result.CassetteDetail = 'Driver published OptCas2 but the default print ticket did not keep it. Set Cassette Feeding Unit = On in Device Settings.'
+        $result.CassetteDetail = 'Driver published a paper-source option but the default print ticket did not keep it. Set Paper Source Options = Cassette Feeding Unit in Device Settings.'
     }
-    if ($finisher -and (Test-TicketHasOption -TicketXml $readback -OptionLocalName 'IFINE1')) {
+    $finisherLocal = ''
+    if ($finisher) { $finisherLocal = Get-XmlLocalName $finisher.Option }
+    if ($finisher -and $finisherLocal -and (Test-TicketHasOption -TicketXml $readback -OptionLocalName $finisherLocal)) {
         $result.FinisherState = 'PASS'
-        $result.FinisherDetail = "Default print ticket option IFINE1 (Inner Finisher E1), " + $finisher.How
+        $result.FinisherDetail = "Default print ticket option " + $finisherLocal + " (Inner Finisher E1), " + $finisher.How
     } elseif ($finisher) {
         $result.FinisherDetail = 'Driver published IFINE1 but the default print ticket did not keep it. Set Output Options = Inner Finisher E1 in Device Settings.'
     }
@@ -2759,7 +3398,7 @@ function Apply-PublishedHardware {
 function Read-HardwareFromTicket {
     $result = @{
         CassetteState  = 'MANUAL'
-        CassetteDetail = 'Cassette Feeding Unit = On is not on the default print ticket. Check Printer properties, Device Settings.'
+        CassetteDetail = 'Paper Source Options = Cassette Feeding Unit is not on the default print ticket. Check Printer properties, Device Settings.'
         FinisherState  = 'MANUAL'
         FinisherDetail = 'Inner Finisher E1 is not on the default print ticket. Check Printer properties, Device Settings.'
     }
@@ -2767,13 +3406,13 @@ function Read-HardwareFromTicket {
     try {
         $ticket = Get-QueueXml
     } catch {
-        $result.CassetteDetail = 'Could not read the default print ticket. Check Device Settings for Cassette Feeding Unit = On.'
+        $result.CassetteDetail = 'Could not read the default print ticket. Check Device Settings for Paper Source Options = Cassette Feeding Unit.'
         $result.FinisherDetail = 'Could not read the default print ticket. Check Device Settings for Output Options = Inner Finisher E1.'
         return $result
     }
     if (Test-TicketHasOption -TicketXml $ticket -OptionLocalName 'OptCas2') {
         $result.CassetteState = 'PASS'
-        $result.CassetteDetail = 'Default print ticket contains option OptCas2 (Cassette Feeding Unit ON)'
+        $result.CassetteDetail = 'Default print ticket contains option OptCas2 (Paper Source Options = Cassette Feeding Unit)'
     }
     if (Test-TicketHasOption -TicketXml $ticket -OptionLocalName 'IFINE1') {
         $result.FinisherState = 'PASS'
@@ -2782,10 +3421,14 @@ function Read-HardwareFromTicket {
     return $result
 }
 
-function Get-EnterNameDetail {
+function Get-StatusLabels {
+    return @('DRIVER', 'PORT', 'PRINTER', 'SIDES', 'PAPER SOURCE', 'OUTPUT', 'USER INFO', 'USER NAME', 'STALE QUEUE')
+}
+
+function Get-UserNameDetail {
     param([string]$PrintUser)
     $name = $PrintUser
-    if ([string]::IsNullOrWhiteSpace($name)) {
+    if ([string]::IsNullOrWhiteSpace($name) -and $script:SupportDir) {
         $saved = Join-Path $script:SupportDir 'requested-print-user.txt'
         if (Test-Path -LiteralPath $saved) {
             $name = (Get-Content -LiteralPath $saved -Raw).Trim()
@@ -2793,9 +3436,7 @@ function Get-EnterNameDetail {
     }
     $who = 'the print username'
     if (-not [string]::IsNullOrWhiteSpace($name)) { $who = $name }
-    return @"
-Printer properties, Device Settings, Set User Information, Settings: User Name = $who. In Default Value Settings set Name to Set for User Name to that entered name. Canon documents this separately from the Windows logon name. The Windows driver does not read the Mac PPD *%INFO_PrPr block.
-"@.Trim()
+    return ("Printer properties, Device Settings, check Set User Information, click Settings..., dialog Default Value Settings, radio User Name, text " + $who + ". Leave Always Confirm User Information When Performing Secured Print checked, Confirm User Name When Printing unchecked, and PIN blank. Do not change Get Device Information.")
 }
 
 function Get-ReportFooter {
@@ -2805,25 +3446,25 @@ function Get-ReportFooter {
         [bool]$Verify
     )
     if ($Verify) {
-        return "No queue changes were saved. Verify opens Printer properties, reads Device Settings, and clicks Cancel. PASS on cassette, finisher, or Enter Name means that control was read back. MANUAL means it could not be read. FAIL on those lines means the value was read and does not match. PASS on SIDES is DuplexingMode OneSided."
+        return "No queue changes were saved. Verify reads Get-PrinterProperty, then opens Printer properties, reads Device Settings, and clicks Cancel. PASS means Paper Source Options, Output Options, Set User Information, or User Name was read back. MANUAL means that item could not be read. FAIL on those lines means the value was read and does not match. PASS on SIDES is 1-sided Printing."
     }
     if ($Result -eq 'PASS') {
-        return "Cassette Feeding Unit, Output Options, and Enter Name were read back from Printer properties. One-sided is the spooler default. Close and reopen Printer properties if that window was already open during the install."
+        return "Driver, port, printer, 1-sided Printing, Cassette Feeding Unit, Inner Finisher E1, Set User Information, and User Name were confirmed. Close and reopen Printer properties if that window was already open during the install."
     }
     if ($Result -eq 'PARTIAL') {
         $user = $PrintUser
         if ([string]::IsNullOrWhiteSpace($user)) { $user = 'the print username' }
         return @"
-RESULT PARTIAL means the RemaxSecure queue, LPR port, driver, and any PASS lines are in place.
-MANUAL means Device Settings automation did not verify that line. Re-running the installer tries the dialog again.
+RESULT PARTIAL means the RemaxSecure queue is installed and any PASS lines were read back.
+MANUAL means that item was not confirmed. Re-running the installer tries again.
 Exit code 2 is not a failed install. When this script is started with irm | iex, exit code 2 does not throw.
 1. Printer properties for $script:PrinterName, Device Settings.
-2. If the driver is Canon Generic Plus PS3, set Config. Profile to iR-ADV C5235/5240.
-3. Cassette Feeding Unit = On.
-4. Output Options = Inner Finisher E1.
-5. Set User Information, Settings, User Name = $user.
-   Default Value Settings, Name to Set for User Name = that entered name (not the Windows logon name).
-6. When SIDES is PASS, one-sided is already the spooler default. Close and reopen Printer properties if they were open during the install.
+2. Paper Source Options = Cassette Feeding Unit.
+3. Output Options = Inner Finisher E1.
+4. Check Set User Information. Click the Settings... button on that row.
+5. In Default Value Settings, under Name to Set for User Information, select User Name (not Logon Name) and type $user in the box under that radio.
+6. Leave Always Confirm User Information When Performing Secured Print checked. Leave Confirm User Name When Printing unchecked. Leave PIN blank. Do not change Get Device Information.
+7. Apply, OK. When SIDES is PASS, 1-sided Printing is already the spooler default.
 Leave the Printer properties window alone while the script is driving it.
 "@.Trim()
     }
@@ -2838,9 +3479,7 @@ function Write-StatusReport {
         [string]$PrintUser,
         $Target
     )
-    $order = @(
-        'QUEUE', 'URI', 'DRIVER', 'CASSETTE', 'FINISHER', 'SIDES', 'ENTER NAME', 'STALE QUEUE'
-    )
+    $order = @(Get-StatusLabels)
     $states = @()
     foreach ($label in $order) { $states += [string]$Status[$label].State }
     $result = Get-ResultLabel $states
@@ -2849,31 +3488,32 @@ function Write-StatusReport {
     if ($Verify) { $title = 'VERIFY REPORT' }
     Write-RemaxLine ("======== Remax Secure Printer " + $title + " ========")
     if ($Verify) { Write-RemaxLine "No changes made." }
-    Write-RemaxLine ("Version:     " + $script:Version)
-    Write-RemaxLine ("RESULT:      " + $result)
-    Write-RemaxLine ("ExitCode:    " + $code)
+    Write-RemaxLine ("Version:      " + $script:Version)
     foreach ($label in $order) {
         $row = $Status[$label]
         $prefix = switch ($label) {
-            'QUEUE' { 'QUEUE:       ' }
-            'URI' { 'URI:         ' }
-            'DRIVER' { 'DRIVER:      ' }
-            'CASSETTE' { 'CASSETTE:    ' }
-            'FINISHER' { 'FINISHER:    ' }
-            'SIDES' { 'SIDES:       ' }
-            'ENTER NAME' { 'ENTER NAME:  ' }
-            'STALE QUEUE' { 'STALE QUEUE: ' }
+            'DRIVER' { 'DRIVER:       ' }
+            'PORT' { 'PORT:         ' }
+            'PRINTER' { 'PRINTER:      ' }
+            'SIDES' { 'SIDES:        ' }
+            'PAPER SOURCE' { 'PAPER SOURCE: ' }
+            'OUTPUT' { 'OUTPUT:       ' }
+            'USER INFO' { 'USER INFO:    ' }
+            'USER NAME' { 'USER NAME:    ' }
+            'STALE QUEUE' { 'STALE QUEUE:  ' }
         }
         Write-RemaxLine ($prefix + $row.State + "  " + $row.Detail)
     }
-    if ($PrintUser) { Write-RemaxLine ("Print user:  " + $PrintUser) }
+    Write-RemaxLine ("RESULT:       " + $result)
+    Write-RemaxLine ("ExitCode:     " + $code)
+    if ($PrintUser) { Write-RemaxLine ("Print user:   " + $PrintUser) }
     try {
         $account = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-        Write-RemaxLine ("Windows account: " + $account + " (logon name, not written as Enter Name)")
+        Write-RemaxLine ("Windows account: " + $account + " (logon name, not used as the print username)")
     } catch {
     }
-    Write-RemaxLine ("Log:         " + $script:LogFile)
-    if ($script:SupportDir) { Write-RemaxLine ("Copy:        " + $script:SupportDir) }
+    Write-RemaxLine ("Log:          " + $script:LogFile)
+    if ($script:SupportDir) { Write-RemaxLine ("Copy:         " + $script:SupportDir) }
     Write-RemaxLine "======================================================"
     Write-RemaxLine (Get-ReportFooter -Result $result -PrintUser $PrintUser -Verify $Verify)
     $script:ReportDone = $true
@@ -2882,10 +3522,35 @@ function Write-StatusReport {
 
 function New-StatusMap {
     $map = @{}
-    foreach ($label in @('QUEUE', 'URI', 'DRIVER', 'CASSETTE', 'FINISHER', 'SIDES', 'ENTER NAME', 'STALE QUEUE')) {
+    foreach ($label in @(Get-StatusLabels)) {
         $map[$label] = @{ State = 'FAIL'; Detail = 'not checked' }
     }
     return $map
+}
+
+function Get-MatchingDriverObject {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    $rows = @()
+    try { $rows = @(Get-PrinterDriver -Name $Name -ErrorAction Stop) } catch { return $null }
+    $best = $null
+    $bestScore = -1
+    $nativeX64 = $true
+    try { $nativeX64 = [bool][Environment]::Is64BitOperatingSystem } catch { $nativeX64 = $true }
+    foreach ($row in @($rows)) {
+        if (-not $row) { continue }
+        $environment = [string]$row.PrinterEnvironment
+        $score = 0
+        if ($nativeX64 -and $environment -match 'x64') { $score = 2 }
+        elseif ((-not $nativeX64) -and $environment -match 'x86') { $score = 2 }
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $best = $row
+        }
+    }
+    if ($best) { return $best }
+    if ($rows.Count -gt 0) { return $rows[0] }
+    return $null
 }
 
 function Get-QueueStatus {
@@ -2893,48 +3558,77 @@ function Get-QueueStatus {
     $status = New-StatusMap
     $printer = Get-PrinterOrNull $script:PrinterName
     if (-not $printer) {
-        $status['QUEUE'].Detail = ($script:PrinterName + " is not installed")
-        $status['URI'].Detail = "expected " + $Target.Uri
+        $status['PRINTER'].Detail = ($script:PrinterName + " is not installed")
+        $status['PORT'].Detail = ("expected Standard TCP/IP port " + $script:PortName + " for " + $Target.Uri)
         $status['DRIVER'].Detail = "queue not installed"
-        $status['CASSETTE'].Detail = "queue not installed"
-        $status['FINISHER'].Detail = "queue not installed"
+        $status['PAPER SOURCE'].Detail = "queue not installed"
+        $status['OUTPUT'].Detail = "queue not installed"
         $status['SIDES'].Detail = "queue not installed"
-        $status['ENTER NAME'].Detail = "queue not installed"
+        $status['USER INFO'].Detail = "queue not installed"
+        $status['USER NAME'].Detail = "queue not installed"
     } else {
-        $status['QUEUE'].State = 'PASS'
-        $status['QUEUE'].Detail = ($script:PrinterName + " is installed on port " + $printer.PortName + " with driver " + $printer.DriverName)
+        $shared = $false
+        try { $shared = [bool]$printer.Shared } catch { $shared = $false }
+        $defaultName = ''
+        try { $defaultName = Get-DefaultPrinterName } catch { $defaultName = '' }
+        $isDefault = ($defaultName -eq $script:PrinterName)
+        $otherCount = 0
+        try {
+            foreach ($other in @(Get-Printer -ErrorAction SilentlyContinue)) {
+                if ([string]$other.Name -and [string]$other.Name -ne $script:PrinterName) { $otherCount++ }
+            }
+        } catch { }
+        if ((-not $shared) -and (-not $isDefault)) {
+            $status['PRINTER'].State = 'PASS'
+            $status['PRINTER'].Detail = ($script:PrinterName + ", not shared, not default")
+        } elseif ($shared) {
+            $status['PRINTER'].State = 'FAIL'
+            $status['PRINTER'].Detail = ($script:PrinterName + " is shared. The recorded queue is not shared.")
+        } elseif ($otherCount -eq 0) {
+            $status['PRINTER'].State = 'MANUAL'
+            $status['PRINTER'].Detail = ($script:PrinterName + " is not shared. It is the only printer, so Windows keeps it as the default.")
+        } else {
+            $status['PRINTER'].State = 'MANUAL'
+            $status['PRINTER'].Detail = ($script:PrinterName + " is not shared, but it is still the default printer.")
+        }
         $snapshot = $null
         $portError = ''
-        try {
-            $snapshot = Get-PortSnapshot ([string]$printer.PortName)
-        } catch {
-            $portError = $_.Exception.Message
-        }
-        if ($snapshot -and (Test-PortMatches $snapshot $Target)) {
-            $status['URI'].State = 'PASS'
-            $status['URI'].Detail = ($Target.Uri + " (Standard TCP/IP port " + $snapshot.Name + ", protocol LPR, queue " + $snapshot.Queue + ", port 515)")
-        } elseif ($portError) {
-            $status['URI'].Detail = ("expected " + $Target.Uri + "; could not read Win32_TCPIPPrinterPort (" + $portError + ")")
+        $portName = [string]$printer.PortName
+        if ($portName -ne $script:PortName) {
+            $status['PORT'].Detail = ("queue is on port " + $portName + "; expected Standard TCP/IP port " + $script:PortName + " (LPR, queue " + $Target.Queue + ", byte counting on, SNMP off)")
         } else {
-            $got = 'missing'
-            if ($snapshot) {
-                $got = ("host " + $snapshot.Host + " queue " + $snapshot.Queue + " protocol " + $snapshot.Protocol + " port " + $snapshot.PortNumber)
+            try { $snapshot = Get-PortSnapshot $portName } catch { $portError = $_.Exception.Message }
+            if ($snapshot -and (Test-PortMatches $snapshot $Target)) {
+                $status['PORT'].State = 'PASS'
+                $status['PORT'].Detail = Format-PortDetail -Snapshot $snapshot -Target $Target
+            } elseif ($portError) {
+                $status['PORT'].Detail = ("expected " + $Target.Uri + "; could not read the port (" + $portError + ")")
+            } else {
+                $got = 'missing'
+                if ($snapshot) {
+                    $snmp = 'off'
+                    if ($snapshot.SnmpEnabled) { $snmp = 'on' }
+                    $got = ("host " + $snapshot.Host + " queue " + $snapshot.Queue + " protocol " + $snapshot.Protocol + " port " + $snapshot.PortNumber + " byte counting " + $snapshot.ByteCount + " SNMP " + $snmp)
+                }
+                $status['PORT'].Detail = ("expected LPR queue " + $Target.Queue + ", byte counting on, SNMP off; found " + $got)
             }
-            $status['URI'].Detail = ("expected " + $Target.Uri + " protocol LPR port 515; found " + $got)
         }
         $driverName = [string]$printer.DriverName
         $rank = Get-DriverRank $driverName
-        if ($rank -ge 2) {
-            $status['DRIVER'].State = 'PASS'
-            $status['DRIVER'].Detail = $driverName
-        } elseif ($rank -eq 1) {
-            $status['DRIVER'].State = 'PASS'
-            $status['DRIVER'].Detail = ($driverName + ". Config. Profile is not readable from PrintManagement. Set it to iR-ADV C5235/5240 in Device Settings.")
+        if ($rank -ge 1) {
+            $driverObj = $null
+            try { $driverObj = Get-MatchingDriverObject $driverName } catch { $driverObj = $null }
+            if (-not $driverObj) { $driverObj = @{ Name = $driverName; PrinterEnvironment = '' } }
+            $report = Get-DriverReport $driverObj
+            $status['DRIVER'].State = [string]$report.State
+            $status['DRIVER'].Detail = [string]$report.Detail
         } else {
-            $status['DRIVER'].Detail = ("installed driver '" + $driverName + "' is not Canon iR-ADV C5235/5240 PS or Canon Generic Plus PS3")
-            $status['ENTER NAME'].Detail = 'Enter Name was not checked because the queue driver is not the Canon PS driver'
-            $status['CASSETTE'].Detail = 'not checked because the queue driver is not the Canon PS driver'
-            $status['FINISHER'].Detail = 'not checked because the queue driver is not the Canon PS driver'
+            $status['DRIVER'].State = 'FAIL'
+            $status['DRIVER'].Detail = ("installed driver '" + $driverName + "' is not " + $script:ExactDriverName)
+            $status['PAPER SOURCE'].Detail = 'not checked because the queue driver is not the Canon PS driver'
+            $status['OUTPUT'].Detail = 'not checked because the queue driver is not the Canon PS driver'
+            $status['USER INFO'].Detail = 'not checked because the queue driver is not the Canon PS driver'
+            $status['USER NAME'].Detail = 'not checked because the queue driver is not the Canon PS driver'
         }
         try {
             $config = Get-PrintConfiguration -PrinterName $script:PrinterName
@@ -2942,21 +3636,23 @@ function Get-QueueStatus {
             if ($config -and $null -ne $config.DuplexingMode) { $mode = [string]$config.DuplexingMode }
             if ($mode -eq 'OneSided') {
                 $status['SIDES'].State = 'PASS'
-                $status['SIDES'].Detail = 'DuplexingMode OneSided (1-sided Printing)'
+                $status['SIDES'].Detail = '1-sided Printing (DuplexingMode OneSided)'
             } else {
-                $status['SIDES'].Detail = ("DuplexingMode expected OneSided, found " + $(if ($mode) { $mode } else { 'blank' }))
+                $status['SIDES'].Detail = ("1-sided Printing expected, found " + $(if ($mode) { $mode } else { 'blank' }))
             }
         } catch {
             $status['SIDES'].Detail = ("Get-PrintConfiguration failed: " + $_.Exception.Message)
         }
-        if ($status['DRIVER'].State -eq 'PASS') {
+        if ($rank -ge 1) {
             $hardware = Read-HardwareFromTicket
-            $status['CASSETTE'].State = $hardware.CassetteState
-            $status['CASSETTE'].Detail = $hardware.CassetteDetail
-            $status['FINISHER'].State = $hardware.FinisherState
-            $status['FINISHER'].Detail = $hardware.FinisherDetail
-            $status['ENTER NAME'].State = 'MANUAL'
-            $status['ENTER NAME'].Detail = Get-EnterNameDetail ''
+            $status['PAPER SOURCE'].State = $hardware.CassetteState
+            $status['PAPER SOURCE'].Detail = $hardware.CassetteDetail
+            $status['OUTPUT'].State = $hardware.FinisherState
+            $status['OUTPUT'].Detail = $hardware.FinisherDetail
+            $status['USER INFO'].State = 'MANUAL'
+            $status['USER INFO'].Detail = 'Set User Information on. Not on the print ticket. Device Settings readback is required.'
+            $status['USER NAME'].State = 'MANUAL'
+            $status['USER NAME'].Detail = Get-UserNameDetail ''
         }
     }
     $stale = Get-PrinterOrNull $script:StaleName
@@ -2990,9 +3686,34 @@ function Invoke-Verify {
             $user = (Get-Content -LiteralPath $savedUser -Raw).Trim()
         }
     }
-    if ($status['QUEUE'].State -eq 'PASS' -and $status['DRIVER'].State -eq 'PASS') {
-        $ui = Invoke-CanonDeviceAutomation -PrintUser $user -Action 'read'
-        Apply-DeviceUiResult -Status $status -Ui $ui -PrintUser $user
+    $installed = Get-PrinterOrNull $script:PrinterName
+    $rank = 0
+    if ($installed) { $rank = Get-DriverRank ([string]$installed.DriverName) }
+    if ($installed -and $rank -ge 1) {
+        $property = $null
+        try {
+            $property = Invoke-CanonPropertySettings -PrintUser $user -Action 'read'
+        } catch {
+            Write-Remax ("Get-PrinterProperty path failed: " + $_.Exception.Message)
+            $property = New-PropertyResult
+        }
+        $ui = $null
+        if (Test-PropertyResultComplete $property) {
+            Write-Remax "Verify read Paper Source Options, Output Options, Set User Information, and User Name from Get-PrinterProperty. Skipping UI Automation."
+        } else {
+            try {
+                $ui = Invoke-CanonDeviceAutomation -PrintUser $user -Action 'read'
+            } catch {
+                Write-Remax ("Device Settings read failed: " + $_.Exception.Message)
+                $ui = New-DeviceUiResult
+                $ui.Attempted = $true
+                $ui.PaperDetail = $_.Exception.Message
+                $ui.OutputDetail = $_.Exception.Message
+                $ui.UserInfoDetail = $_.Exception.Message
+                $ui.UserNameDetail = $_.Exception.Message
+            }
+        }
+        Apply-DeviceUiResult -Status $status -Ui $ui -Property $property -PrintUser $user
     }
     $code = Write-StatusReport -Kind 'verify' -Verify $true -Status $status -PrintUser $user -Target $target
     try {
@@ -3066,23 +3787,24 @@ function Invoke-Install {
         $installed = @()
         try { $installed = @(Get-InstalledDriverNames) } catch { $installed = @() }
         Show-MissingDriverHelp $installed
-        $status['DRIVER'].Detail = 'Canon iR-ADV C5235/5240 PS (or Canon Generic Plus PS3) is not installed'
-        $status['QUEUE'].Detail = ($script:PrinterName + ' was not created')
-        $status['URI'].Detail = ('port not created; expected ' + $target.Uri)
+        $status['DRIVER'].Detail = ($script:ExactDriverName + ' is not installed')
+        $status['PRINTER'].Detail = ($script:PrinterName + ' was not created')
+        $status['PORT'].Detail = ('port not created; expected ' + $target.Uri)
         $code = Write-StatusReport -Kind 'install' -Verify $false -Status $status -PrintUser $printUser -Target $target
         Copy-RemaxLog -Result 'FAIL' -PrintUser $printUser -Target $target
         return $code
     }
     $driverName = [string]$selected.Name
     Write-Remax ("Using driver " + $driverName)
+    try { Write-AssistServiceNote } catch { }
     try {
         Ensure-LprPort $target | Out-Null
         Ensure-PrinterQueue -DriverName $driverName -Target $target
     } catch {
         Write-Remax ("Queue setup failed: " + $_.Exception.Message)
         $status = Get-QueueStatus $target
-        if ($status['QUEUE'].State -ne 'PASS') {
-            $status['QUEUE'].Detail = ("setup failed: " + $_.Exception.Message)
+        if ($status['PRINTER'].State -eq 'FAIL') {
+            $status['PRINTER'].Detail = ("setup failed: " + $_.Exception.Message)
         }
         $code = Write-StatusReport -Kind 'install' -Verify $false -Status $status -PrintUser $printUser -Target $target
         Copy-RemaxLog -Result 'FAIL' -PrintUser $printUser -Target $target
@@ -3105,39 +3827,54 @@ function Invoke-Install {
         Write-Remax ("One-sided setting failed after device options: " + $_.Exception.Message)
     }
     $status = Get-QueueStatus $target
-    if ($status['DRIVER'].State -eq 'PASS' -and $status['CASSETTE'].State -ne 'PASS') {
-        $status['CASSETTE'].State = 'MANUAL'
+    $queueRank = 0
+    $live = Get-PrinterOrNull $script:PrinterName
+    if ($live) { $queueRank = Get-DriverRank ([string]$live.DriverName) }
+    if ($queueRank -ge 1 -and $status['PAPER SOURCE'].State -ne 'PASS') {
+        $status['PAPER SOURCE'].State = 'MANUAL'
         if ($hardware.CassetteState -eq 'PASS') {
-            $status['CASSETTE'].Detail = 'OptCas2 was written but did not remain on the default print ticket. Set Cassette Feeding Unit = On in Device Settings.'
+            $status['PAPER SOURCE'].Detail = 'A paper-source option was written but did not remain on the default print ticket. Set Paper Source Options = Cassette Feeding Unit in Device Settings.'
         } else {
-            $status['CASSETTE'].Detail = $hardware.CassetteDetail
+            $status['PAPER SOURCE'].Detail = $hardware.CassetteDetail
         }
     }
-    if ($status['DRIVER'].State -eq 'PASS' -and $status['FINISHER'].State -ne 'PASS') {
-        $status['FINISHER'].State = 'MANUAL'
+    if ($queueRank -ge 1 -and $status['OUTPUT'].State -ne 'PASS') {
+        $status['OUTPUT'].State = 'MANUAL'
         if ($hardware.FinisherState -eq 'PASS') {
-            $status['FINISHER'].Detail = 'IFINE1 was written but did not remain on the default print ticket. Set Output Options = Inner Finisher E1 in Device Settings.'
+            $status['OUTPUT'].Detail = 'A finisher option was written but did not remain on the default print ticket. Set Output Options = Inner Finisher E1 in Device Settings.'
         } else {
-            $status['FINISHER'].Detail = $hardware.FinisherDetail
+            $status['OUTPUT'].Detail = $hardware.FinisherDetail
         }
     }
     if ($duplexError -and $status['SIDES'].State -ne 'PASS') {
         $status['SIDES'].State = 'FAIL'
         $status['SIDES'].Detail = ("Set-PrintConfiguration OneSided failed: " + $duplexError)
     }
-    if ($status['DRIVER'].State -eq 'PASS') {
-        $ui = $null
+    if ($queueRank -ge 1) {
+        $property = $null
         try {
-            $ui = Invoke-CanonDeviceAutomation -PrintUser $printUser -Action 'apply'
+            $property = Invoke-CanonPropertySettings -PrintUser $printUser -Action 'apply'
         } catch {
-            Write-Remax ("Device Settings automation failed: " + $_.Exception.Message)
-            $ui = New-DeviceUiResult
-            $ui.Attempted = $true
-            $ui.CassetteDetail = $_.Exception.Message
-            $ui.FinisherDetail = $_.Exception.Message
-            $ui.EnterDetail = $_.Exception.Message
+            Write-Remax ("Get-PrinterProperty path failed: " + $_.Exception.Message)
+            $property = New-PropertyResult
         }
-        Apply-DeviceUiResult -Status $status -Ui $ui -PrintUser $printUser
+        $ui = $null
+        if (Test-PropertyResultComplete $property) {
+            Write-Remax "Paper Source Options, Output Options, Set User Information, and User Name were confirmed with Get-PrinterProperty. Skipping UI Automation."
+        } else {
+            try {
+                $ui = Invoke-CanonDeviceAutomation -PrintUser $printUser -Action 'apply'
+            } catch {
+                Write-Remax ("Device Settings automation failed: " + $_.Exception.Message)
+                $ui = New-DeviceUiResult
+                $ui.Attempted = $true
+                $ui.PaperDetail = $_.Exception.Message
+                $ui.OutputDetail = $_.Exception.Message
+                $ui.UserInfoDetail = $_.Exception.Message
+                $ui.UserNameDetail = $_.Exception.Message
+            }
+        }
+        Apply-DeviceUiResult -Status $status -Ui $ui -Property $property -PrintUser $printUser
         $mode = ''
         try {
             $mode = Set-OneSided
@@ -3151,14 +3888,14 @@ function Invoke-Install {
         }
         if ($mode -eq 'OneSided') {
             $status['SIDES'].State = 'PASS'
-            $status['SIDES'].Detail = 'DuplexingMode OneSided (1-sided Printing)'
+            $status['SIDES'].Detail = '1-sided Printing (DuplexingMode OneSided)'
         } elseif ($mode) {
             $status['SIDES'].State = 'FAIL'
             $status['SIDES'].Detail = ("DuplexingMode expected OneSided, found " + $mode)
         }
     }
     $states = @()
-    foreach ($label in @('QUEUE', 'URI', 'DRIVER', 'CASSETTE', 'FINISHER', 'SIDES', 'ENTER NAME', 'STALE QUEUE')) {
+    foreach ($label in @(Get-StatusLabels)) {
         $states += [string]$status[$label].State
     }
     $result = Get-ResultLabel $states
@@ -3239,10 +3976,14 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Remove-Item Env:REMAX_LPR_BYTE_COUNT -ErrorAction SilentlyContinue
     $target = Resolve-PrinterTarget
     Assert-Remax ($target.Uri -eq 'lpd://172.16.105.21/RemaxSecure') 'default URI matches the Mac queue'
+    Assert-Remax ($target.PortName -eq '172.16.105.21') 'default port is named after the host'
+    Assert-Remax ($script:PortName -eq '172.16.105.21') 'script port name follows the host'
+    Assert-Remax ($script:LegacyPortName -eq 'RemaxSecure_LPR') 'legacy port name is remembered'
     Assert-Remax ($target.ByteCount) 'LPR byte counting defaults on'
     $env:REMAX_PRINTER_URI = 'lpd://10.1.2.3/OtherQueue'
     $over = Resolve-PrinterTarget
     Assert-Remax ($over.Host -eq '10.1.2.3' -and $over.Queue -eq 'OtherQueue') 'REMAX_PRINTER_URI overrides host and queue'
+    Assert-Remax ($over.PortName -eq '10.1.2.3') 'port name follows an overridden host'
     if ($null -eq $savedUri) {
         Remove-Item Env:REMAX_PRINTER_URI -ErrorAction SilentlyContinue
     } else {
@@ -3251,6 +3992,7 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     if ($null -ne $savedHost) { $env:REMAX_PRINTER_HOST = $savedHost }
     if ($null -ne $savedQueue) { $env:REMAX_LPR_QUEUE = $savedQueue }
     if ($null -ne $savedByte) { $env:REMAX_LPR_BYTE_COUNT = $savedByte }
+    [void](Resolve-PrinterTarget)
     $caps = @"
 <?xml version="1.0"?>
 <psf:PrintCapabilities xmlns:psf="http://schemas.microsoft.com/windows/2003/08/printing/printschemaframework" xmlns:psk="http://schemas.microsoft.com/windows/2003/08/printing/printschemakeywords" xmlns:ns0000="http://example/canon">
@@ -3281,7 +4023,35 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.1.0') 'version string is 1.1.0'
+    Assert-Remax ($script:Version -eq '1.2.0') 'version string is 1.2.0'
+    Assert-Remax ((Get-PrintUserPromptText) -eq 'Print username (last name + first initial, lowercase, for example tsiogase)') 'prompt shows the tsiogase example'
+    Assert-Remax ((Get-DriverRank 'Canon iR-ADV C5235/5240 PS3') -gt (Get-DriverRank 'Canon iR-ADV C5235/5240 PS')) 'exact PS3 outranks the older PS name'
+    Assert-Remax ((Get-InfArchitectureScore 'C:\drv\x64\cn.inf') -gt (Get-InfArchitectureScore 'C:\drv\x86\cn.inf')) 'x64 INF outranks x86'
+    Assert-Remax ((Test-CanonPackageVersionText '30.0.0.1') -eq $true) 'file version 30.0.0.1 is the recorded package'
+    Assert-Remax ((Test-CanonPackageVersionText 'V30.00') -eq $true) 'package text 30.00 is accepted'
+    Assert-Remax ((Test-CanonPackageVersionText '30.02') -eq $false) '30.02 is not the recorded package'
+    Assert-Remax ($null -eq (Test-CanonPackageVersionText '')) 'blank version is unknown, not a mismatch'
+    $exactReport = Get-DriverReport -Driver @{ Name = 'Canon iR-ADV C5235/5240 PS3'; PrinterEnvironment = 'Windows x64' } -VersionText '30.0.0.1'
+    Assert-Remax ($exactReport.State -eq 'PASS') 'exact PS3 30.0.0.1 x64 is PASS'
+    $wrongVer = Get-DriverReport -Driver @{ Name = 'Canon iR-ADV C5235/5240 PS3'; PrinterEnvironment = 'Windows x64' } -VersionText '21.85.0.0'
+    Assert-Remax ($wrongVer.State -eq 'MANUAL') 'a different file version is MANUAL'
+    $genericReport = Get-DriverReport -Driver @{ Name = 'Canon Generic Plus PS3'; PrinterEnvironment = 'Windows x64' } -VersionText ''
+    Assert-Remax ($genericReport.State -eq 'MANUAL') 'Generic Plus PS3 is not the recorded driver name'
+    Assert-Remax (Test-RecordedPortValues -Protocol 2 -Queue 'RemaxSecure' -ByteCount 1 -Snmp 0 -ExpectedQueue 'RemaxSecure' -ExpectByte $true) 'recorded port registry values pass'
+    Assert-Remax (-not (Test-RecordedPortValues -Protocol 1 -Queue 'RemaxSecure' -ByteCount 1 -Snmp 0 -ExpectedQueue 'RemaxSecure' -ExpectByte $true)) 'RAW protocol fails the port check'
+    Assert-Remax (-not (Test-RecordedPortValues -Protocol 2 -Queue 'RemaxSecure' -ByteCount 1 -Snmp 1 -ExpectedQueue 'RemaxSecure' -ExpectByte $true)) 'SNMP on fails the port check'
+    Assert-Remax (Test-DefaultValueTitle 'Default Value Settings') 'dialog title matches'
+    Assert-Remax (-not (Test-DefaultValueTitle 'User Information Settings')) 'older dialog title is not Default Value Settings'
+    $propRows = @(
+        @{ PropertyName = 'Config:PaperSourceOptions'; Value = 'Cassette Feeding Unit' }
+        @{ PropertyName = 'Config:CNFinisher'; Value = 'None' }
+    )
+    $paperProp = Find-NamedPrinterProperty -Rows $propRows -Names @('Config:CNSrcOption', 'Config:PaperSourceOptions')
+    Assert-Remax ((Get-PropertyRowName $paperProp) -eq 'Config:PaperSourceOptions') 'paper property name is found'
+    Assert-Remax (Test-PropertyReadback -Value 'Cassette Feeding Unit' -Accept @('Cassette Feeding Unit', 'OptCas2')) 'paper value readback matches'
+    Assert-Remax (Test-PropertyReadback -Value 'Inner Finisher E1' -Accept @('Inner Finisher E1', 'IFINE1')) 'finisher value readback matches'
+    Assert-Remax (Test-PropertyReadback -Value 'tsiogase' -Accept @('tsiogase')) 'user name property readback matches'
+    Assert-Remax (-not (Test-PropertyReadback -Value 'Logon Name' -Accept @('tsiogase'))) 'logon name is not the print username'
     Assert-Remax ((ConvertTo-CanonLabel 'Set User Information(L)') -eq 'Set User Information') 'accelerator stripped from Set User Information'
     Assert-Remax ((ConvertTo-CanonLabel 'Settings(W)...') -eq 'Settings') 'settings button label normalized'
     Assert-Remax ((ConvertTo-CanonLabel 'Output Options:') -eq 'Output Options') 'output label normalized'
@@ -3302,48 +4072,76 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
         }
     }
     $page = New-Object System.Collections.Generic.List[object]
-    [void]$page.Add((New-FakeEl 'Cassette Feeding Unit' 'CheckBox' 420 70 180 18 '' 'Off'))
-    [void]$page.Add((New-FakeEl 'Paper Deck Unit' 'CheckBox' 420 96 160 18 '' 'Off'))
-    [void]$page.Add((New-FakeEl 'Output Options:' 'Text' 30 150 140 18 '' ''))
-    [void]$page.Add((New-FakeEl '' 'ComboBox' 420 148 220 22 'None' ''))
-    [void]$page.Add((New-FakeEl 'External Puncher:' 'Text' 30 210 140 18 '' ''))
-    [void]$page.Add((New-FakeEl '' 'ComboBox' 420 208 220 22 'None' ''))
-    [void]$page.Add((New-FakeEl 'PS Output from Application:' 'Text' 30 270 200 18 '' ''))
-    [void]$page.Add((New-FakeEl '' 'ComboBox' 420 268 220 22 'Auto' ''))
-    [void]$page.Add((New-FakeEl 'Use Department ID Management(J)' 'CheckBox' 30 320 260 18 '' 'Off'))
-    [void]$page.Add((New-FakeEl 'Settings...' 'Button' 520 316 120 22 '' ''))
-    [void]$page.Add((New-FakeEl 'Set User Information(L)' 'CheckBox' 30 352 220 18 '' 'On'))
-    [void]$page.Add((New-FakeEl 'Settings(W)...' 'Button' 520 348 120 22 '' ''))
+    [void]$page.Add((New-FakeEl 'Paper Source Options:' 'Text' 30 70 180 18 '' ''))
+    [void]$page.Add((New-FakeEl '' 'ComboBox' 420 68 220 22 'None' ''))
+    [void]$page.Add((New-FakeEl 'Output Options:' 'Text' 30 110 140 18 '' ''))
+    [void]$page.Add((New-FakeEl '' 'ComboBox' 420 108 220 22 'None' ''))
+    [void]$page.Add((New-FakeEl 'Get Device Information' 'CheckBox' 30 150 220 18 '' 'Off'))
+    [void]$page.Add((New-FakeEl 'Settings...' 'Button' 520 148 120 22 '' ''))
+    [void]$page.Add((New-FakeEl 'Set User Information' 'CheckBox' 30 190 220 18 '' 'Off'))
+    [void]$page.Add((New-FakeEl 'Settings...' 'Button' 520 188 120 22 '' ''))
     $targets = Find-CanonDeviceTargets $page
-    Assert-Remax ($targets.Cassette -and (Test-CanonLabelEquals $targets.Cassette.Name 'Cassette Feeding Unit')) 'cassette checkbox found'
-    Assert-Remax ($targets.OutputCombo -and ($targets.OutputCombo.Top -eq 148)) 'output combo is the Output Options row'
-    Assert-Remax ($targets.UserSettings -and ($targets.UserSettings.Name -eq 'Settings(W)...')) 'user information settings button'
-    Assert-Remax ($null -eq $targets.Profile) 'screenshot page has no config profile combo'
+    Assert-Remax ($targets.PaperCombo -and ($targets.PaperCombo.Top -eq 68)) 'paper combo is the Paper Source Options row'
+    Assert-Remax ($targets.OutputCombo -and ($targets.OutputCombo.Top -eq 108)) 'output combo is the Output Options row'
+    Assert-Remax ($targets.UserInfo -and (Test-CanonLabelEquals $targets.UserInfo.Name 'Set User Information')) 'Set User Information checkbox found'
+    Assert-Remax ($targets.UserSettings -and ($targets.UserSettings.Top -eq 188)) 'Settings... is the button beside Set User Information'
+    Assert-Remax ($null -eq $targets.Profile) 'recorded page has no config profile combo'
+    $dialog = New-Object System.Collections.Generic.List[object]
+    [void]$dialog.Add((New-FakeEl 'Name to Set for User Information:' 'Text' 20 20 280 18 '' ''))
+    [void]$dialog.Add((New-FakeEl 'Logon Name' 'RadioButton' 30 50 160 18 '' 'Off'))
+    [void]$dialog.Add((New-FakeEl 'User Name' 'RadioButton' 30 80 160 18 '' 'On'))
+    [void]$dialog.Add((New-FakeEl '' 'Edit' 50 108 200 22 'tsiogase' ''))
+    [void]$dialog.Add((New-FakeEl 'Always Confirm User Information When Performing Secured Print' 'CheckBox' 30 150 420 18 '' 'On'))
+    [void]$dialog.Add((New-FakeEl 'Confirm User Name When Printing' 'CheckBox' 30 180 280 18 '' 'Off'))
+    [void]$dialog.Add((New-FakeEl 'PIN:' 'Text' 30 220 40 18 '' ''))
+    [void]$dialog.Add((New-FakeEl '' 'Edit' 80 218 80 22 '' ''))
+    $readOk = Read-DefaultValueFromElements -Elements $dialog -PrintUser 'tsiogase'
+    Assert-Remax ($readOk.Ok) 'User Name radio, text, confirm, and blank PIN read back'
+    Assert-Remax ($readOk.Name -eq 'tsiogase') 'text under the User Name radio is the print username'
+    $dialog[2].Toggle = 'Off'
+    $dialog[1].Toggle = 'On'
+    $dialog[3].Value = ''
+    $readLogon = Read-DefaultValueFromElements -Elements $dialog -PrintUser 'tsiogase'
+    Assert-Remax (-not $readLogon.Ok) 'Logon Name is not a passing User Name readback'
     $namedCombos = New-Object System.Collections.Generic.List[object]
     [void]$namedCombos.Add((New-FakeEl 'Output Options:' 'ComboBox' 420 148 220 22 'None' ''))
     [void]$namedCombos.Add((New-FakeEl 'External Puncher:' 'ComboBox' 420 208 220 22 'None' ''))
     $namedPick = Find-CanonComboByLabel -Elements $namedCombos -Labels @('Output Options')
     Assert-Remax ($namedPick -and ($namedPick.Top -eq 148)) 'combo named Output Options is selected'
-    $mode = Resolve-NameToSetLabel -Labels @('Logon name', 'Computer name', 'Enter name') -PrintUser 'tsiogase'
-    Assert-Remax ($mode -eq 'Enter name') 'enter name wins over logon'
-    $onlyLogon = Resolve-NameToSetLabel -Labels @('Logon name', 'User Account Name') -PrintUser 'tsiogase'
-    Assert-Remax ($null -eq $onlyLogon) 'logon subtypes are not Enter Name'
-    $unknownRadio = Resolve-NameToSetLabel -Labels @('Some other choice') -PrintUser 'tsiogase' -KnownOnly
-    Assert-Remax ($null -eq $unknownRadio) 'unknown radio is not selected'
+    $paperPick = Resolve-PaperSourceLabel -Labels @('None', 'Cassette Feeding Unit')
+    Assert-Remax ($paperPick -eq 'Cassette Feeding Unit') 'paper source choice'
     $finisherPick = Resolve-FinisherLabel -Labels @('None', 'Inner Finisher E1', 'Staple Finisher')
     Assert-Remax ($finisherPick -eq 'Inner Finisher E1') 'finisher choice'
     $profilePick = Resolve-ProfileLabel -Labels @('Auto', 'Canon iR-ADV C5235/5240')
     Assert-Remax ($profilePick -eq 'Canon iR-ADV C5235/5240') 'profile choice'
-    Assert-Remax (Test-EnterNameConfigured -UserField 'tsiogase' -NameToSet 'Enter name' -PrintUser 'tsiogase' -SawNameToSet $true) 'enter name readback passes'
-    Assert-Remax (-not (Test-EnterNameConfigured -UserField 'tsiogase' -NameToSet 'Logon name' -PrintUser 'tsiogase' -SawNameToSet $true)) 'logon name readback fails'
-    Assert-Remax (Test-EnterNameConfigured -UserField 'tsiogase' -NameToSet 'tsiogase' -PrintUser 'tsiogase' -SawNameToSet $true) 'username stored in name-to-set passes'
-    Assert-Remax (-not (Test-EnterNameConfigured -UserField 'tsiogase' -NameToSet 'Enter name' -PrintUser 'tsiogase' -SawNameToSet $false)) 'missing name-to-set control fails'
-    $keepTicket = Merge-DeviceLine -TicketState 'PASS' -TicketDetail 'ticket' -UiState 'MANUAL' -UiDetail 'ui' -Attempted $false
+    $keepTicket = Merge-DeviceLine -TicketState 'PASS' -TicketDetail 'ticket' -PropertyState '' -PropertyDetail '' -UiState 'MANUAL' -UiDetail 'ui' -Attempted $false
     Assert-Remax ($keepTicket.State -eq 'PASS' -and $keepTicket.Detail -eq 'ticket') 'ticket PASS stands when UI did not run'
-    $uiWin = Merge-DeviceLine -TicketState 'MANUAL' -TicketDetail 'ticket' -UiState 'PASS' -UiDetail 'readback' -Attempted $true
+    $uiWin = Merge-DeviceLine -TicketState 'MANUAL' -TicketDetail 'ticket' -PropertyState '' -PropertyDetail '' -UiState 'PASS' -UiDetail 'readback' -Attempted $true
     Assert-Remax ($uiWin.State -eq 'PASS' -and $uiWin.Detail -eq 'readback') 'UI readback PASS wins'
-    $uiFail = Merge-DeviceLine -TicketState 'PASS' -TicketDetail 'ticket' -UiState 'FAIL' -UiDetail 'off' -Attempted $true
-    Assert-Remax ($uiFail.State -eq 'FAIL' -and $uiFail.Detail -eq 'off') 'verified mismatch beats a print ticket'
+    $propWin = Merge-DeviceLine -TicketState 'MANUAL' -TicketDetail 'ticket' -PropertyState 'PASS' -PropertyDetail 'property' -UiState 'MANUAL' -UiDetail 'ui' -Attempted $true
+    Assert-Remax ($propWin.State -eq 'PASS' -and $propWin.Detail -eq 'property') 'property readback stands when UI cannot see the control'
+    $uiFail = Merge-DeviceLine -TicketState 'PASS' -TicketDetail 'ticket' -PropertyState 'PASS' -PropertyDetail 'property' -UiState 'FAIL' -UiDetail 'off' -Attempted $true
+    Assert-Remax ($uiFail.State -eq 'FAIL' -and $uiFail.Detail -eq 'off') 'verified mismatch beats a property readback'
+    $mergeMap = New-StatusMap
+    $mergeMap['DRIVER'].State = 'PASS'
+    $mergeMap['DRIVER'].Detail = 'driver'
+    $mergeProp = New-PropertyResult
+    $mergeProp.PaperState = 'PASS'
+    $mergeProp.PaperDetail = 'property paper'
+    $mergeUi = New-DeviceUiResult
+    $mergeUi.Attempted = $true
+    $mergeUi.PaperState = 'MANUAL'
+    $mergeUi.PaperDetail = 'ui missed paper'
+    $mergeUi.OutputState = 'PASS'
+    $mergeUi.OutputDetail = 'ui output'
+    $mergeUi.UserInfoState = 'PASS'
+    $mergeUi.UserInfoDetail = 'Set User Information is on.'
+    $mergeUi.UserNameState = 'PASS'
+    $mergeUi.UserNameDetail = 'User Name = tsiogase'
+    Apply-DeviceUiResult -Status $mergeMap -Ui $mergeUi -Property $mergeProp -PrintUser 'tsiogase'
+    Assert-Remax ($mergeMap['PAPER SOURCE'].State -eq 'PASS' -and $mergeMap['PAPER SOURCE'].Detail -eq 'property paper') 'property PASS remains when the dialog misses that control'
+    Assert-Remax ($mergeMap['OUTPUT'].State -eq 'PASS' -and $mergeMap['OUTPUT'].Detail -eq 'ui output') 'dialog PASS wins over a missing property'
+    Assert-Remax ($mergeMap['USER NAME'].Detail -eq 'User Name = tsiogase') 'user name line keeps the readback'
     $savedDeviceUi = $env:REMAX_DEVICE_UI
     $env:REMAX_DEVICE_UI = '0'
     Assert-Remax ((Get-DeviceUiSkipReason) -eq 'REMAX_DEVICE_UI=0') 'REMAX_DEVICE_UI=0 skips the dialog'

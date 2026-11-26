@@ -106,17 +106,22 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.1.0",
+        "1.2.0",
         "PrintUIEntry",
         "UIAutomationClient",
         "REMAX_DEVICE_DAT",
         "REMAX_DEVICE_UI",
         "Default Value Settings",
-        "Name to Set for User Name",
+        "Name to Set for User Information",
+        "Paper Source Options",
         "Find-CanonDeviceTargets",
-        "Resolve-NameToSetLabel",
         "Invoke-CanonDeviceAutomation",
+        "Get-PrinterProperty",
+        "Set-PrinterProperty",
+        "PrinterDriverData",
         "Read-PrintUserPrompt",
+        "last name + first initial",
+        "for example tsiogase",
         "RemaxSecure",
         "RemaxSecure_COLOUR",
         "RemaxSecure_LPR",
@@ -126,6 +131,9 @@ def main() -> int:
         "Add-PrinterPort",
         "-LprHostAddress",
         "-LprQueueName",
+        "-LprByteCounting",
+        "SNMP Enabled",
+        "Byte Count",
         "OneSided",
         "Set-PrintConfiguration",
         "OptCas2",
@@ -133,6 +141,13 @@ def main() -> int:
         "Cassette Feeding Unit",
         "Inner Finisher E1",
         "Set User Information",
+        "Settings...",
+        "Get Device Information",
+        "Canon iR-ADV C5235/5240 PS3",
+        "30.0.0.1",
+        "30.00",
+        "Canon Driver Information Assist Service",
+        "not shared",
         "REMAX_PRINT_USER",
         "REMAX_CANON_PKG_URL",
         "REMAX_PRINTER_URI",
@@ -143,6 +158,7 @@ def main() -> int:
         "VERIFY REPORT",
         "MANUAL",
         "PARTIAL",
+        "RESULT:",
         "-SelfTest",
         "-Verify",
         "https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1",
@@ -151,16 +167,27 @@ def main() -> int:
         if token not in installer:
             fail(f"install-windows.ps1 is missing {token}")
     forbidden = [
-        "Set-ItemProperty",
-        "New-ItemProperty",
         "reg.exe",
         "HKCU:\\Software\\Canon",
         "HKLM:\\SOFTWARE\\Canon",
-        "PrinterDriverData",
     ]
     for token in forbidden:
         if token in installer:
             fail(f"install-windows.ps1 contains unsupported store write {token}")
+    if "Set-ItemProperty" in installer:
+        fail("Set-ItemProperty is not used. Port monitor values use New-ItemProperty in Set-PortRegistry.")
+    port_fn = installer.split("function Set-PortRegistry", 1)[1].split("function ", 1)[0]
+    if port_fn.count("New-ItemProperty") != 4:
+        fail("Set-PortRegistry must be the only writer, with four New-ItemProperty calls")
+    if installer.count("New-ItemProperty") != 4:
+        fail("New-ItemProperty is only allowed for the Standard TCP/IP port monitor")
+    for line in installer.splitlines():
+        if "PrinterDriverData" in line and (
+            "New-ItemProperty" in line or "Set-ItemProperty" in line or "SetValue" in line
+        ):
+            fail("PrinterDriverData is inventoried by name and must not be written")
+    if "\u2014" in installer or "\u2014" in readme or "\u2014" in verify:
+        fail("em dash is not allowed")
     if "&&" in installer or "||" in installer:
         fail("install-windows.ps1 uses && or ||, which Windows PowerShell 5.1 will not run")
     if not installer.startswith("#Requires -Version 5.1\n"):

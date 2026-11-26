@@ -1,5 +1,5 @@
 #!/bin/bash
-# Remax Secure Printer — terminal installer for macOS.
+# Remax Secure Printer, terminal installer for macOS.
 # RE/MAX Escarpment IT. No .app, no GUI automation.
 #
 # Agents (admin password required):
