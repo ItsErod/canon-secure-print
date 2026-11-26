@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.1
+# Remax Secure Printer - Windows installer 1.2.2
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -66,7 +66,7 @@
 #   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
 #   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.2.1'
+$script:Version = '1.2.2'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -1003,6 +1003,106 @@ function Test-PinnedCanonDownload {
     return @{ Ok = $true; Pinned = $true; Detail = ("SHA256 " + $script:CanonPkgSha256) }
 }
 
+function Get-PackageKindFromLeaf {
+    param([string]$Leaf)
+    if ([string]::IsNullOrWhiteSpace($Leaf)) { return '' }
+    $lower = $Leaf.ToLowerInvariant()
+    if ($lower.EndsWith('.zip')) { return 'zip' }
+    if ($lower.EndsWith('.cab')) { return 'cab' }
+    if ($lower.EndsWith('.inf')) { return 'inf' }
+    if ($lower.EndsWith('.exe')) { return 'exe' }
+    return ''
+}
+
+function Get-ArchiveKindFromHeader {
+    param([byte[]]$Header)
+    if ($null -eq $Header -or $Header.Length -lt 2) { return '' }
+    if ($Header[0] -eq 0x50 -and $Header[1] -eq 0x4B) { return 'zip' }
+    if ($Header.Length -ge 4 -and $Header[0] -eq 0x4D -and $Header[1] -eq 0x53 -and $Header[2] -eq 0x43 -and $Header[3] -eq 0x46) {
+        return 'cab'
+    }
+    if ($Header[0] -eq 0x4D -and $Header[1] -eq 0x5A) { return 'exe' }
+    return ''
+}
+
+function Resolve-PackageKind {
+    param([string]$Leaf, [byte[]]$Header)
+    $fromHeader = Get-ArchiveKindFromHeader $Header
+    if ($fromHeader -eq 'zip') { return 'zip' }
+    $fromName = Get-PackageKindFromLeaf $Leaf
+    if ($fromName) { return $fromName }
+    if ($fromHeader) { return $fromHeader }
+    return ''
+}
+
+function Get-DownloadFileName {
+    param([string]$Url, [string]$Kind)
+    if (-not $Kind) {
+        $leaf = ''
+        try {
+            $leaf = [System.IO.Path]::GetFileName(([Uri]$Url).AbsolutePath)
+        } catch {
+            $leaf = ''
+        }
+        $Kind = Get-PackageKindFromLeaf $leaf
+    }
+    if (-not $Kind) { return '' }
+    return ('download.' + $Kind)
+}
+
+function Read-FileHeader {
+    param([string]$Path, [int]$Count)
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $buf = New-Object byte[] $Count
+        $read = $stream.Read($buf, 0, $Count)
+        if ($read -le 0) { return , (New-Object byte[] 0) }
+        if ($read -lt $Count) {
+            $short = New-Object byte[] $read
+            [System.Array]::Copy($buf, $short, $read)
+            return , $short
+        }
+        return , $buf
+    } finally {
+        if ($stream) { $stream.Dispose() }
+    }
+}
+
+function Move-DownloadToKind {
+    param([string]$Path, [string]$Kind)
+    $name = Get-DownloadFileName -Kind $Kind
+    if (-not $name) { return $Path }
+    $dest = Join-Path (Split-Path -Parent $Path) $name
+    if ($dest -eq $Path) { return $Path }
+    if (Test-Path -LiteralPath $dest) {
+        Remove-Item -LiteralPath $dest -Force
+    }
+    Move-Item -LiteralPath $Path -Destination $dest -Force
+    return $dest
+}
+
+function Expand-RemaxZip {
+    param([string]$ZipPath, [string]$Destination)
+    $named = Move-DownloadToKind -Path $ZipPath -Kind 'zip'
+    if (Test-Path -LiteralPath $Destination) {
+        Remove-Item -LiteralPath $Destination -Recurse -Force
+    }
+    $loaded = $false
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+        $loaded = $true
+    } catch {
+        $loaded = $false
+    }
+    if ($loaded) {
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($named, $Destination)
+        return
+    }
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    Expand-Archive -LiteralPath $named -DestinationPath $Destination -Force
+}
+
 function Save-RemaxDownload {
     param([string]$Url, [string]$Destination)
     try {
@@ -1052,20 +1152,16 @@ function Install-CanonPackageFromUrl {
     } catch {
         throw "REMAX_CANON_PKG_URL is not a valid URL."
     }
-    $lower = $leaf.ToLowerInvariant()
-    $kind = ''
-    if ($lower.EndsWith('.zip')) { $kind = 'zip' }
-    elseif ($lower.EndsWith('.cab')) { $kind = 'cab' }
-    elseif ($lower.EndsWith('.inf')) { $kind = 'inf' }
-    elseif ($lower.EndsWith('.exe')) { $kind = 'exe' }
-    else {
+    $urlKind = Get-PackageKindFromLeaf $leaf
+    if (-not $urlKind) {
         throw "REMAX_CANON_PKG_URL must end in .zip, .cab, .inf, or .exe. This script only extracts an INF. It does not run a Canon setup EXE unless 7-Zip can unpack it."
     }
     $work = Join-Path $env:TEMP ("remax-canon-" + [Guid]::NewGuid().ToString('n'))
     New-Item -ItemType Directory -Path $work -Force | Out-Null
     try {
-        $download = Join-Path $work 'download.bin'
+        $download = Join-Path $work (Get-DownloadFileName -Kind $urlKind)
         Write-Remax ("Downloading Canon driver package from " + $Url)
+        Write-Remax ("Saving the download as " + (Split-Path -Leaf $download))
         Save-RemaxDownload -Url $Url -Destination $download
         $length = (Get-Item -LiteralPath $download).Length
         if ($length -gt 250MB) {
@@ -1080,12 +1176,21 @@ function Install-CanonPackageFromUrl {
             throw [string]$check.Detail
         }
         Write-Remax ([string]$check.Detail)
+        $header = Read-FileHeader -Path $download -Count 4
+        $kind = Resolve-PackageKind -Leaf $leaf -Header $header
+        if (-not $kind) {
+            throw "Downloaded file is not a .zip, .cab, .inf, or .exe."
+        }
+        if ($kind -ne $urlKind) {
+            Write-Remax ("Download contents are " + $kind + ", not " + $urlKind + ". Using " + $kind + ".")
+            $download = Move-DownloadToKind -Path $download -Kind $kind
+        }
         $extract = Join-Path $work 'extract'
         New-Item -ItemType Directory -Path $extract -Force | Out-Null
         if ($kind -eq 'inf') {
             Copy-Item -LiteralPath $download -Destination (Join-Path $extract $leaf) -Force
         } elseif ($kind -eq 'zip') {
-            Expand-Archive -LiteralPath $download -DestinationPath $extract -Force
+            Expand-RemaxZip -ZipPath $download -Destination $extract
         } elseif ($kind -eq 'cab') {
             & expand.exe $download -F:* $extract
             if ($LASTEXITCODE -ne 0) { throw "expand.exe could not unpack the cab." }
@@ -4141,7 +4246,32 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.1') 'version string is 1.2.1'
+    Assert-Remax ($script:Version -eq '1.2.2') 'version string is 1.2.2'
+    Assert-Remax ((Get-DownloadFileName $script:CanonPkgUrl) -eq 'download.zip') 'built-in package is saved as download.zip'
+    Assert-Remax ((Get-DownloadFileName 'https://example.invalid/driver.cab') -eq 'download.cab') 'cab URL is saved as download.cab'
+    Assert-Remax ((Get-DownloadFileName 'https://example.invalid/driver.inf') -eq 'download.inf') 'inf URL is saved as download.inf'
+    Assert-Remax ((Get-DownloadFileName 'https://example.invalid/Setup.exe') -eq 'download.exe') 'exe URL is saved as download.exe'
+    Assert-Remax ((Get-PackageKindFromLeaf 'Canon-PS3-v30.00-x64.zip') -eq 'zip') 'zip leaf is a zip'
+    Assert-Remax ((Resolve-PackageKind -Leaf 'file.bin' -Header ([byte[]](0x50, 0x4B, 3, 4))) -eq 'zip') 'PK header is a zip even without a .zip name'
+    Assert-Remax ((Get-ArchiveKindFromHeader ([byte[]](0x4D, 0x53, 0x43, 0x46))) -eq 'cab') 'MSCF header is a cab'
+    $tempRoot = $env:TEMP
+    if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = [System.IO.Path]::GetTempPath() }
+    $zipRoot = Join-Path $tempRoot ('remax-zip-' + [Guid]::NewGuid().ToString('n'))
+    $zipSrc = Join-Path $zipRoot 'src'
+    $zipOut = Join-Path $zipRoot 'out'
+    New-Item -ItemType Directory -Path $zipSrc -Force | Out-Null
+    New-Item -ItemType Directory -Path $zipOut -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $zipSrc 'CNS30UA64.INF') -Value 'model' -Encoding ASCII
+    $zipBin = Join-Path $zipRoot 'payload.bin'
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($zipSrc, $zipBin)
+    $pkFile = Join-Path $zipRoot 'pk.bin'
+    [System.IO.File]::WriteAllBytes($pkFile, [byte[]](0x50, 0x4B, 3, 4))
+    $pkHeader = Read-FileHeader -Path $pkFile -Count 4
+    Assert-Remax ((Get-ArchiveKindFromHeader $pkHeader) -eq 'zip') 'a PK file header is read back as zip'
+    Expand-RemaxZip -ZipPath $zipBin -Destination $zipOut
+    Assert-Remax (Test-Path -LiteralPath (Join-Path $zipOut 'CNS30UA64.INF')) 'a zip saved without a .zip name still extracts'
+    Remove-Item -LiteralPath $zipRoot -Recurse -Force -ErrorAction SilentlyContinue
     Assert-Remax ($script:CanonPkgUrl -eq 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip') 'built-in driver URL is the public release asset'
     Assert-Remax ($script:CanonPkgSha256 -eq '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da') 'built-in driver SHA256 is pinned'
     Assert-Remax ($script:CanonPkgBytes -eq 26722033) 'built-in driver size is pinned'

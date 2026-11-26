@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.1**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.2**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -314,7 +314,7 @@ SHA256 4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da
 26722033 bytes
 ```
 
-The download uses `Invoke-WebRequest -UseBasicParsing` with TLS 1.2 and follows the GitHub 302 redirect. A size or SHA256 mismatch stops the install and names both the value received and the value expected. The zip is not executed. `pnputil /add-driver` installs `x64/Driver/CNS30UA64.INF` (not `x64/misc/NullDriver/lasernull.inf`), then `Add-PrinterDriver -Name 'Canon iR-ADV C5235/5240 PS3'`.
+The download uses `Invoke-WebRequest -UseBasicParsing` with TLS 1.2 and follows the GitHub 302 redirect. The file is saved as `download.zip` (or `.cab`, `.inf`, or `.exe` when that is the URL). Windows PowerShell 5.1 `Expand-Archive` rejects any other extension. A `PK` header is extracted as a zip even when the saved name is not `.zip`, using `System.IO.Compression.ZipFile` and then `Expand-Archive` only if that assembly does not load. A size or SHA256 mismatch stops the install and names both the value received and the value expected. The zip is not executed. `pnputil /add-driver` installs `x64/Driver/CNS30UA64.INF` (not `x64/misc/NullDriver/lasernull.inf`), then `Add-PrinterDriver -Name 'Canon iR-ADV C5235/5240 PS3'`.
 
 `REMAX_CANON_PKG_URL` replaces that URL for one run. A different URL is not checked against this SHA256.
 
@@ -364,7 +364,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.1 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.2 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

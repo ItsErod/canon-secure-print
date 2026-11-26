@@ -106,7 +106,10 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.1",
+        "1.2.2",
+        "Get-DownloadFileName",
+        "Expand-RemaxZip",
+        "Resolve-PackageKind",
         "https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip",
         "4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da",
         "CNS30UA64.INF",
