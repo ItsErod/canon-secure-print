@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.2
+# Remax Secure Printer - Windows installer 1.2.3
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -66,7 +66,7 @@
 #   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
 #   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.2.2'
+$script:Version = '1.2.3'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -1118,26 +1118,298 @@ function Save-RemaxDownload {
     }
 }
 
+function ConvertTo-ExitCode {
+    param($Value)
+    $last = $null
+    foreach ($item in @($Value)) {
+        if ($null -eq $item) { continue }
+        $parsed = 0
+        $isNumber = $false
+        if ($item -is [byte] -or $item -is [int] -or $item -is [long] -or $item -is [decimal]) {
+            $parsed = [int]$item
+            $isNumber = $true
+        } else {
+            $text = [string]$item
+            $isNumber = [int]::TryParse($text, [ref]$parsed)
+        }
+        if ($isNumber) { $last = [int]$parsed }
+    }
+    if ($null -eq $last) { return 1 }
+    return [int]$last
+}
+
+function Invoke-LoggedProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList
+    )
+    $shown = $FilePath
+    if ($ArgumentList -and $ArgumentList.Count -gt 0) {
+        $shown = $shown + ' ' + ($ArgumentList -join ' ')
+    }
+    Write-Remax $shown
+    $lines = New-Object System.Collections.Generic.List[string]
+    $code = 1
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& $FilePath @ArgumentList 2>&1)
+        if ($null -ne $LASTEXITCODE) { $code = [int]$LASTEXITCODE }
+        foreach ($item in @($output)) {
+            if ($null -eq $item) { continue }
+            $text = [string]$item
+            [void]$lines.Add($text)
+            Write-Remax $text
+        }
+    } catch {
+        $text = $_.Exception.Message
+        [void]$lines.Add($text)
+        Write-Remax $text
+        $code = 1
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    Write-Remax ("Exit code " + $code)
+    $result = @{
+        Code  = [int]$code
+        Lines = @($lines.ToArray())
+    }
+    return , $result
+}
+
+function Test-PnputilSuccess {
+    param($Code)
+    $n = ConvertTo-ExitCode $Code
+    if ($n -eq 0) { return $true }
+    if ($n -eq 259) { return $true }
+    if ($n -eq 3010) { return $true }
+    return $false
+}
+
+function Get-PnputilPublishedName {
+    param([string[]]$Lines)
+    foreach ($line in @($Lines)) {
+        if ([string]$line -match '(?i)Published Name:\s*(oem\d+\.inf)') {
+            return $Matches[1]
+        }
+    }
+    return ''
+}
+
+function Get-InfExactModel {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $want = $script:ExactDriverName
+    $fallback = ''
+    $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"
+    foreach ($raw in ($normalized -split "`n")) {
+        $line = (Remove-InfComment $raw).Trim()
+        if ($line -notmatch '^"([^"]*)"\s*=') { continue }
+        $model = $Matches[1]
+        if ($model -ceq $want) { return $model }
+        if ($model -match 'C5235' -and $model -match '5240' -and $model -match 'PS3') {
+            if (-not $fallback) { $fallback = $model }
+        }
+    }
+    return $fallback
+}
+
+function Get-PathLeafAny {
+    param([string]$Path)
+    $leaf = [string]$Path
+    $slash = $leaf.LastIndexOf('\')
+    $fwd = $leaf.LastIndexOf('/')
+    $cut = $slash
+    if ($fwd -gt $cut) { $cut = $fwd }
+    if ($cut -ge 0 -and $cut -lt ($leaf.Length - 1)) {
+        return $leaf.Substring($cut + 1)
+    }
+    return $leaf
+}
+
+function Find-DriverStoreInf {
+    param([string]$PublishedName, [string]$Leaf)
+    $leaf = $Leaf
+    if ([string]::IsNullOrWhiteSpace($leaf)) { $leaf = $script:CanonInfLeaf }
+    $leafLower = $leaf.ToLowerInvariant()
+    try {
+        $drivers = @(Get-WindowsDriver -Online -ErrorAction Stop)
+        foreach ($driver in $drivers) {
+            $published = ''
+            $original = ''
+            try { $published = [string]$driver.Driver } catch { $published = '' }
+            try { $original = [string]$driver.OriginalFileName } catch { $original = '' }
+            $nameHit = $false
+            if ($PublishedName -and $published -and ($published -eq $PublishedName)) { $nameHit = $true }
+            $leafHit = $false
+            if ($original -and ((Get-PathLeafAny $original).ToLowerInvariant() -eq $leafLower)) { $leafHit = $true }
+            if (($nameHit -or $leafHit) -and $original -and (Test-Path -LiteralPath $original)) {
+                Write-Remax ("Driver store INF from Get-WindowsDriver: " + $original)
+                return $original
+            }
+        }
+    } catch {
+        Write-Remax ("Get-WindowsDriver was not available: " + $_.Exception.Message)
+    }
+    try {
+        $signed = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop)
+        foreach ($item in $signed) {
+            $infName = ''
+            try { $infName = [string]$item.InfName } catch { $infName = '' }
+            if ($PublishedName -and $infName -eq $PublishedName) {
+                Write-Remax ("Win32_PnPSignedDriver lists " + $infName + " (" + [string]$item.DeviceName + ")")
+            }
+        }
+    } catch {
+        Write-Remax ("Win32_PnPSignedDriver was not available: " + $_.Exception.Message)
+    }
+    $root = Join-Path $env:windir 'System32\DriverStore\FileRepository'
+    if (-not (Test-Path -LiteralPath $root)) {
+        Write-Remax ("Driver store was not found: " + $root)
+        return ''
+    }
+    $dirs = @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -like 'cns30ua64.inf_amd64_*'
+        })
+    foreach ($dir in $dirs) {
+        $files = @(Get-ChildItem -LiteralPath $dir.FullName -File -ErrorAction SilentlyContinue | Where-Object {
+                $_.Name.ToLowerInvariant() -eq $leafLower
+            })
+        if ($files.Count -gt 0) {
+            Write-Remax ("Driver store INF from FileRepository: " + $files[0].FullName)
+            return [string]$files[0].FullName
+        }
+    }
+    Write-Remax ("No " + $leaf + " under " + $root + "\cns30ua64.inf_amd64_*")
+    return ''
+}
+
+function Test-PrinterDriverPresent {
+    param([string]$Name)
+    try {
+        $rows = @(Get-PrinterDriver -Name $Name -ErrorAction Stop)
+        foreach ($row in $rows) {
+            if ([string]$row.Name -eq $Name) { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+function Get-PrintUiExePath {
+    $sixtyFourOs = $false
+    $sixtyFourProc = $true
+    try { $sixtyFourOs = [bool][Environment]::Is64BitOperatingSystem } catch { $sixtyFourOs = $false }
+    try { $sixtyFourProc = [bool][Environment]::Is64BitProcess } catch { $sixtyFourProc = $true }
+    if ($sixtyFourOs -and -not $sixtyFourProc) {
+        $native = Join-Path $env:SystemRoot 'Sysnative\printui.exe'
+        if (Test-Path -LiteralPath $native) { return $native }
+    }
+    $path = Join-Path $env:SystemRoot 'System32\printui.exe'
+    if (Test-Path -LiteralPath $path) { return $path }
+    return ''
+}
+
+function Register-CanonPrinterDriver {
+    param(
+        [string]$Model,
+        [string]$StoreInf
+    )
+    Write-Remax ("Add-PrinterDriver -Name '" + $Model + "'")
+    try {
+        Add-PrinterDriver -Name $Model -ErrorAction Stop | Out-Null
+        if (Test-PrinterDriverPresent $Model) {
+            Write-Remax ("Registered " + $Model + " without InfPath.")
+            return $true
+        }
+        Write-Remax "Add-PrinterDriver without InfPath did not list the driver."
+    } catch {
+        Write-Remax ("Add-PrinterDriver without InfPath failed: " + $_.Exception.Message)
+    }
+    if ([string]::IsNullOrWhiteSpace($StoreInf)) {
+        Write-Remax "Driver store INF was not found. The temporary download INF is not passed to Add-PrinterDriver."
+        return $false
+    }
+    Write-Remax ("Add-PrinterDriver -Name '" + $Model + "' -InfPath '" + $StoreInf + "'")
+    try {
+        Add-PrinterDriver -Name $Model -InfPath $StoreInf -ErrorAction Stop | Out-Null
+        if (Test-PrinterDriverPresent $Model) {
+            Write-Remax ("Registered " + $Model + " from the driver store INF.")
+            return $true
+        }
+        Write-Remax "Add-PrinterDriver with the driver store INF did not list the driver."
+    } catch {
+        Write-Remax ("Add-PrinterDriver with the driver store INF failed: " + $_.Exception.Message)
+    }
+    $printui = Get-PrintUiExePath
+    if ($printui) {
+        $attempt = Invoke-LoggedProcess -FilePath $printui -ArgumentList @('/ia', '/m', $Model, '/f', $StoreInf)
+        if (Test-PrinterDriverPresent $Model) {
+            Write-Remax ("printui.exe /ia registered " + $Model)
+            return $true
+        }
+        Write-Remax ("printui.exe /ia did not register " + $Model + " (exit " + $attempt.Code + ").")
+    } else {
+        Write-Remax "printui.exe was not found."
+    }
+    $rundll = Get-RemaxRundllPath
+    $entry = 'printui.dll,PrintUIEntry /ia /m "' + $Model + '" /h x64 /v 3 /f "' + $StoreInf + '"'
+    $fallback = Invoke-LoggedProcess -FilePath $rundll -ArgumentList @($entry)
+    if (Test-PrinterDriverPresent $Model) {
+        Write-Remax ("PrintUIEntry /ia registered " + $Model)
+        return $true
+    }
+    Write-Remax ("PrintUIEntry /ia did not register " + $Model + " (exit " + $fallback.Code + ").")
+    return $false
+}
+
 function Install-DriverFromInf {
     param(
         [string]$InfPath,
         [string]$Model
     )
-    Write-Remax ("pnputil /add-driver " + $InfPath + " /install")
-    & pnputil.exe /add-driver $InfPath /install
-    if ($LASTEXITCODE -ne 0) {
-        Write-Remax ("pnputil /add-driver exited " + $LASTEXITCODE + ". Trying pnputil -i -a.")
-        & pnputil.exe -i -a $InfPath
-        if ($LASTEXITCODE -ne 0) {
-            Write-Remax ("pnputil -i -a exited " + $LASTEXITCODE + ". Still trying Add-PrinterDriver.")
+    $model = $Model
+    $text = ''
+    try { $text = Read-AllText $InfPath } catch { $text = '' }
+    if ($text) {
+        $exact = Get-InfExactModel $text
+        if ($exact -and ($exact -cne $model)) {
+            Write-Remax ("INF model string is '" + $exact + "'. Using that instead of '" + $model + "'.")
+            $model = $exact
+        } elseif ($exact) {
+            Write-Remax ("INF model string matches '" + $exact + "'.")
+            $model = $exact
         }
     }
-    try {
-        Write-Remax ("Add-PrinterDriver -Name '" + $Model + "' -InfPath '" + $InfPath + "'")
-        Add-PrinterDriver -Name $Model -InfPath $InfPath
-        Write-Remax ("Registered printer driver " + $Model)
-    } catch {
-        Write-Remax ("Add-PrinterDriver for " + $Model + ": " + $_.Exception.Message)
+    $pnputil = Join-Path $env:windir 'System32\pnputil.exe'
+    if (-not (Test-Path -LiteralPath $pnputil)) { $pnputil = 'pnputil.exe' }
+    $added = Invoke-LoggedProcess -FilePath $pnputil -ArgumentList @('/add-driver', $InfPath, '/install')
+    if (-not (Test-PnputilSuccess $added.Code)) {
+        Write-Remax "pnputil /add-driver /install was not accepted. Trying pnputil -i -a."
+        $added = Invoke-LoggedProcess -FilePath $pnputil -ArgumentList @('-i', '-a', $InfPath)
+    }
+    if (Test-PnputilSuccess $added.Code) {
+        if ([int]$added.Code -eq 259) {
+            Write-Remax "pnputil exit 259: the driver package is already present."
+        } elseif ([int]$added.Code -eq 3010) {
+            Write-Remax "pnputil exit 3010: the driver package was staged. A restart may be required."
+        }
+    } else {
+        Write-Remax ("pnputil did not stage the driver (exit " + $added.Code + "). Still trying to register it from the driver store.")
+    }
+    $published = Get-PnputilPublishedName -Lines $added.Lines
+    if ($published) {
+        Write-Remax ("pnputil published name " + $published)
+    } else {
+        Write-Remax "pnputil output had no Published Name."
+    }
+    $leaf = Get-PathLeafAny $InfPath
+    $store = Find-DriverStoreInf -PublishedName $published -Leaf $leaf
+    if (-not $store) {
+        $store = Find-DriverStoreInf -PublishedName $published -Leaf $script:CanonInfLeaf
+    }
+    $ok = Register-CanonPrinterDriver -Model $model -StoreInf $store
+    if (-not $ok) {
+        Write-Remax ("Could not register printer driver " + $model)
     }
 }
 
@@ -1192,8 +1464,8 @@ function Install-CanonPackageFromUrl {
         } elseif ($kind -eq 'zip') {
             Expand-RemaxZip -ZipPath $download -Destination $extract
         } elseif ($kind -eq 'cab') {
-            & expand.exe $download -F:* $extract
-            if ($LASTEXITCODE -ne 0) { throw "expand.exe could not unpack the cab." }
+            $expanded = Invoke-LoggedProcess -FilePath 'expand.exe' -ArgumentList @($download, '-F:*', $extract)
+            if ([int]$expanded.Code -ne 0) { throw ("expand.exe could not unpack the cab (exit " + $expanded.Code + ").") }
         } else {
             $seven = $null
             foreach ($candidate in @(
@@ -1214,8 +1486,8 @@ function Install-CanonPackageFromUrl {
                 throw "The URL is an .exe. This script does not launch Canon setup (it opens a GUI, and the silent switches are not stable). Install 7-Zip so the EXE can be unpacked, or point REMAX_CANON_PKG_URL at a .zip of the extracted Driver folder that contains the INF."
             }
             Write-Remax ("Unpacking EXE with 7-Zip, not executing it: " + $seven)
-            & $seven x -y ("-o" + $extract) $download
-            if ($LASTEXITCODE -ne 0) {
+            $unpacked = Invoke-LoggedProcess -FilePath $seven -ArgumentList @('x', '-y', ('-o' + $extract), $download)
+            if ([int]$unpacked.Code -ne 0) {
                 throw "7-Zip could not unpack the EXE. Point REMAX_CANON_PKG_URL at a .zip of the extracted Driver folder."
             }
         }
@@ -1530,9 +1802,9 @@ function Add-LprPort {
         '//nologo', $vbs, '-a', '-r', $script:PortName,
         '-h', $Target.Host, '-o', 'lpr', '-q', $Target.Queue, '-n', '515'
     )
-    & cscript.exe @prnArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw ("prnport.vbs failed with exit " + $LASTEXITCODE)
+    $ported = Invoke-LoggedProcess -FilePath 'cscript.exe' -ArgumentList $prnArgs
+    if ([int]$ported.Code -ne 0) {
+        throw ("prnport.vbs failed with exit " + $ported.Code)
     }
 }
 
@@ -4246,7 +4518,45 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.2') 'version string is 1.2.2'
+    Assert-Remax ($script:Version -eq '1.2.3') 'version string is 1.2.3'
+    Assert-Remax (Test-PnputilSuccess 0) 'pnputil exit 0 is success'
+    Assert-Remax (Test-PnputilSuccess 259) 'pnputil exit 259 means the package is already present'
+    Assert-Remax (Test-PnputilSuccess 3010) 'pnputil exit 3010 is success with a restart'
+    Assert-Remax (-not (Test-PnputilSuccess 5)) 'pnputil exit 5 is a failure'
+    $publishedSample = @(
+        'Microsoft PnP Utility',
+        'Adding driver package:  CNS30UA64.INF',
+        'Driver package added successfully.',
+        'Published Name:         oem42.inf',
+        'Total driver packages:  1',
+        'Added driver packages:  1'
+    )
+    Assert-Remax ((Get-PnputilPublishedName $publishedSample) -eq 'oem42.inf') 'pnputil Published Name is parsed'
+    Assert-Remax ((ConvertTo-ExitCode @('Published Name: oem42.inf', 'Added driver packages:  1', 2)) -eq 2) 'exit code uses the last integer, not earlier text'
+    Assert-Remax ((ConvertTo-ExitCode 0) -eq 0) 'exit code 0 stays 0'
+    $modelInf = @"
+[Manufacturer]
+"Canon" = Canon,NTamd64
+
+[Canon.NTamd64]
+"Canon iR-ADV C5235/5240 PS3" = ADVC5240,USBPRINT\CanoniR-ADV_C5235/520173
+"@
+    Assert-Remax ((Get-InfExactModel $modelInf) -ceq 'Canon iR-ADV C5235/5240 PS3') 'quoted INF model matches character for character'
+    if ($env:REMAX_SELFTEST_INF -and (Test-Path -LiteralPath $env:REMAX_SELFTEST_INF)) {
+        $realText = Read-AllText $env:REMAX_SELFTEST_INF
+        $realModel = Get-InfExactModel $realText
+        Assert-Remax ($realModel -ceq 'Canon iR-ADV C5235/5240 PS3') 'release CNS30UA64.INF model matches exactly'
+        $realPick = Select-BestDriverName -Names @(Get-InfDriverModels -Text $realText -Architecture 'amd64')
+        Assert-Remax ($realPick -ceq 'Canon iR-ADV C5235/5240 PS3') 'release INF selection is the PS3 model'
+    }
+    $shell = Join-Path $PSHOME 'pwsh'
+    if (-not (Test-Path -LiteralPath $shell)) { $shell = Join-Path $PSHOME 'powershell.exe' }
+    if (Test-Path -LiteralPath $shell) {
+        $probe = @(Invoke-LoggedProcess -FilePath $shell -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', 'Write-Output "published-line"; exit 7'))
+        Assert-Remax ($probe.Count -eq 1) 'logged process output does not leak into the pipeline'
+        Assert-Remax ([int]$probe[0].Code -eq 7) 'logged process keeps its exit code'
+        Assert-Remax (($probe[0].Lines -join "`n") -match 'published-line') 'logged process output is captured'
+    }
     Assert-Remax ((Get-DownloadFileName $script:CanonPkgUrl) -eq 'download.zip') 'built-in package is saved as download.zip'
     Assert-Remax ((Get-DownloadFileName 'https://example.invalid/driver.cab') -eq 'download.cab') 'cab URL is saved as download.cab'
     Assert-Remax ((Get-DownloadFileName 'https://example.invalid/driver.inf') -eq 'download.inf') 'inf URL is saved as download.inf'
@@ -4457,9 +4767,9 @@ try {
             Show-Usage
             Invoke-Complete 1
         }
-        'selftest' { Invoke-Complete (Invoke-SelfTest) }
-        'verify' { Invoke-Complete (Invoke-Verify) }
-        default { Invoke-Complete (Invoke-Install) }
+        'selftest' { Invoke-Complete (ConvertTo-ExitCode (Invoke-SelfTest)) }
+        'verify' { Invoke-Complete (ConvertTo-ExitCode (Invoke-Verify)) }
+        default { Invoke-Complete (ConvertTo-ExitCode (Invoke-Install)) }
     }
 } catch {
     if ($script:Completing) { throw }

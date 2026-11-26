@@ -106,7 +106,11 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.2",
+        "1.2.3",
+        "ConvertTo-ExitCode",
+        "Test-PnputilSuccess",
+        "Get-PnputilPublishedName",
+        "printui.exe",
         "Get-DownloadFileName",
         "Expand-RemaxZip",
         "Resolve-PackageKind",
