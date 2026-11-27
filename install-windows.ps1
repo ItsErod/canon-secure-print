@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.14
+# Remax Secure Printer - Windows installer 1.2.15
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -78,7 +78,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.14'
+$script:Version = '1.2.15'
 $script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
 $script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
@@ -196,9 +196,102 @@ function Invoke-Complete {
         return
     }
     $script:Completing = $true
+    Invoke-RemaxFinishUi -Code $Code
     if ($script:RanAsFile) { exit $Code }
     $finish = Get-IexFinishMessage $Code
     if ($finish) { Write-RemaxLine $finish }
+}
+
+$script:ReportOk = $false
+$script:ItEmail = 'it@rmxemail.net'
+$script:PopupTitle = 'RemaxSecure Printer'
+
+# What happens when the run ends. The install report is already sent by then.
+#   PASS (exit 0): success pop-up, then this PowerShell window closes.
+#   FAIL (exit 1): error pop-up, and the window stays open with the report.
+#   PARTIAL (exit 2): no pop-up, the window stays open as before.
+# REMAX_NO_EXIT=1 keeps the window open (the pop-up still shows).
+# Only install mode does any of this. -SelfTest, -Verify and help never do.
+function Get-RemaxFinishAction {
+    param([int]$Code, [string]$Result, [string]$Mode, [string]$NoExit, [bool]$OnWindows)
+    $action = @{ Popup = 'none'; Close = $false }
+    if ($Mode -ne 'install') { return $action }
+    if (-not $OnWindows) { return $action }
+    if ($Code -eq 0 -and ($Result -eq 'PASS' -or [string]::IsNullOrEmpty($Result))) {
+        $action.Popup = 'success'
+        $action.Close = ($NoExit -ne '1')
+    } elseif ($Code -eq 1) {
+        $action.Popup = 'error'
+    }
+    return $action
+}
+
+function Get-RemaxSuccessMessage {
+    param([string]$PrintUser)
+    $lines = New-Object System.Collections.Generic.List[string]
+    [void]$lines.Add('The RemaxSecure printer was successfully added.')
+    [void]$lines.Add('')
+    if (-not [string]::IsNullOrWhiteSpace($PrintUser)) {
+        [void]$lines.Add('Print username: ' + $PrintUser.Trim())
+        [void]$lines.Add('')
+    }
+    [void]$lines.Add('To print, choose RemaxSecure in any app, then release the job at the printer.')
+    return ($lines -join "`r`n")
+}
+
+function Get-RemaxErrorMessage {
+    return ("The RemaxSecure printer was not added.`r`n`r`nTake a photo of the PowerShell window and send it to IT at " + $script:ItEmail + ".")
+}
+
+function Show-RemaxPopup {
+    param([string]$Text, [string]$Kind)
+    # WScript.Shell Popup flags: 0x40 information or 0x10 error, plus 0x1000
+    # system modal so it stays on top of every window.
+    $icon = 0x40
+    if ($Kind -eq 'error') { $icon = 0x10 }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        [void]$shell.Popup($Text, 0, $script:PopupTitle, ($icon + 0x1000))
+        return $true
+    } catch {
+        Write-Remax ("WScript.Shell pop-up failed: " + $_.Exception.Message)
+    }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        $owner = New-Object System.Windows.Forms.Form
+        $owner.TopMost = $true
+        $boxIcon = [System.Windows.Forms.MessageBoxIcon]::Information
+        if ($Kind -eq 'error') { $boxIcon = [System.Windows.Forms.MessageBoxIcon]::Error }
+        [void][System.Windows.Forms.MessageBox]::Show($owner, $Text, $script:PopupTitle, [System.Windows.Forms.MessageBoxButtons]::OK, $boxIcon)
+        $owner.Dispose()
+        return $true
+    } catch {
+        Write-Remax ("MessageBox pop-up failed: " + $_.Exception.Message)
+    }
+    return $false
+}
+
+function Invoke-RemaxFinishUi {
+    param([int]$Code)
+    $action = Get-RemaxFinishAction -Code $Code -Result ([string]$script:LastResult) -Mode ([string]$script:Mode) -NoExit ([string]$env:REMAX_NO_EXIT) -OnWindows (Test-WindowsHost)
+    if ($action.Popup -eq 'none') { return }
+    try { Exit-InputLock } catch { }
+    try { Complete-RemaxProgress } catch { }
+    if ($action.Popup -eq 'success') {
+        if (-not $script:ReportOk -and -not (Test-SkipInstallReport)) {
+            Write-Remax 'The install passed but the install report did not reach the tickets site. Showing the success pop-up anyway.'
+        }
+        Write-Remax 'Showing the success pop-up.'
+        [void](Show-RemaxPopup -Text (Get-RemaxSuccessMessage -PrintUser ([string]$script:LastPrintUser)) -Kind 'info')
+        if ($action.Close) {
+            Write-Remax 'Closing this PowerShell window (set REMAX_NO_EXIT=1 to keep it open).'
+            [System.Environment]::Exit(0)
+        }
+        Write-RemaxLine 'REMAX_NO_EXIT=1, so this window stays open.'
+        return
+    }
+    Write-Remax 'Showing the error pop-up. This window stays open.'
+    [void](Show-RemaxPopup -Text (Get-RemaxErrorMessage) -Kind 'error')
 }
 
 function Get-IexFinishMessage {
@@ -239,6 +332,8 @@ Environment (set them in the elevated PowerShell window):
                          release is downloaded and its size and SHA256 are
                          checked. Restored with /Sr d g r before the username.
   REMAX_SKIP_CLEANUP     Set to 1 to keep an existing queue, port, and driver.
+  REMAX_NO_EXIT          Set to 1 to keep the window open after a PASS. The
+                         success pop-up still shows.
   REMAX_SKIP_FIREWALL    Set to 1 to skip the firewall rule and AV note.
   REMAX_PS_OUTPUT        Optional PS Output from Application value.
                          Unset leaves that combo unchanged.
@@ -1038,6 +1133,7 @@ function Send-RemaxInstallReport {
         if ($posted.Status -ne 400 -and $posted.Status -ne 413) { break }
     }
     if ($posted.Status -eq 201) {
+        $script:ReportOk = $true
         Write-RemaxLine 'REPORTED:     PASS'
     } else {
         $suffix = ''
@@ -8113,7 +8209,7 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.14') 'version string is 1.2.14'
+    Assert-Remax ($script:Version -eq '1.2.15') 'version string is 1.2.15'
     Assert-Remax (-not (Test-AlwaysConfirmWanted)) 'Always Confirm User Information stays unchecked'
     $alwaysText = ''
     if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
@@ -8171,6 +8267,31 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ($elevated.Contains("REMAX_LAUNCH_VERSION = '" + $script:Version + "'")) 'elevated relaunch records the launcher version'
     if ($null -eq $savedUser) { Remove-Item Env:REMAX_PRINT_USER -ErrorAction SilentlyContinue } else { $env:REMAX_PRINT_USER = $savedUser }
     Assert-Remax ((Get-ReportTail -Text ('abcde') -MaxBytes 3) -eq 'cde') 'report log tail keeps the last bytes'
+    $fa = Get-RemaxFinishAction -Code 0 -Result 'PASS' -Mode 'install' -NoExit '' -OnWindows $true
+    Assert-Remax ($fa.Popup -eq 'success' -and $fa.Close) 'PASS shows the success pop-up and closes the window'
+    $fa = Get-RemaxFinishAction -Code 0 -Result 'PASS' -Mode 'install' -NoExit '1' -OnWindows $true
+    Assert-Remax ($fa.Popup -eq 'success' -and -not $fa.Close) 'REMAX_NO_EXIT=1 keeps the window open after PASS'
+    $fa = Get-RemaxFinishAction -Code 1 -Result 'FAIL' -Mode 'install' -NoExit '' -OnWindows $true
+    Assert-Remax ($fa.Popup -eq 'error' -and -not $fa.Close) 'FAIL shows the error pop-up and keeps the window open'
+    $fa = Get-RemaxFinishAction -Code 2 -Result 'PARTIAL' -Mode 'install' -NoExit '' -OnWindows $true
+    Assert-Remax ($fa.Popup -eq 'none' -and -not $fa.Close) 'PARTIAL keeps the window open with no pop-up'
+    foreach ($fm in @('selftest', 'verify', 'help', 'usage-error')) {
+        $fa = Get-RemaxFinishAction -Code 0 -Result 'PASS' -Mode $fm -NoExit '' -OnWindows $true
+        Assert-Remax ($fa.Popup -eq 'none' -and -not $fa.Close) ($fm + ' mode never pops up or closes')
+    }
+    $fa = Get-RemaxFinishAction -Code 0 -Result 'PASS' -Mode 'install' -NoExit '' -OnWindows $false
+    Assert-Remax ($fa.Popup -eq 'none' -and -not $fa.Close) 'a non-Windows host never pops up or closes'
+    $okText = Get-RemaxSuccessMessage -PrintUser 'hoffmannl'
+    Assert-Remax ($okText.Contains('successfully added') -and $okText.Contains('Print username: hoffmannl') -and $okText.Contains('release the job at the printer')) 'success pop-up names the print username and how to print'
+    Assert-Remax ((Get-RemaxErrorMessage).Contains('it@rmxemail.net')) 'error pop-up tells the agent to send a photo to IT'
+    Assert-Remax (-not ($okText + (Get-RemaxErrorMessage)).Contains([string][char]0x2014)) 'pop-up text has no em dash'
+    $finishIdx = 1
+    $reportIdx = 0
+    if (-not [string]::IsNullOrEmpty($pidText)) {
+        $finishIdx = $pidText.IndexOf('Invoke-RemaxFinishUi -Code $Code')
+        $reportIdx = $pidText.IndexOf('try { Send-RemaxInstallReport -ExitCode $Code }')
+    }
+    Assert-Remax ($reportIdx -ge 0 -and $finishIdx -gt $reportIdx) 'the install report is sent before the pop-up and window close'
     $rtFields = @{
         PrintUser = [psobject]'hoffmannl'
         Computer  = [psobject]"LAPTOP`t1"

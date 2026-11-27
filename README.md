@@ -236,11 +236,13 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.14**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
+Windows installer **1.2.15**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
 ```
+
+When the run ends (1.2.15 and later), the install report is sent first. On **RESULT PASS** a pop-up titled **RemaxSecure Printer** says the printer was added, with the print username and how to print, and the PowerShell window closes when OK is clicked. Set `$env:REMAX_NO_EXIT='1'` to keep the window open. On **RESULT FAIL** an error pop-up asks the agent to send a photo of the window to it@rmxemail.net, and the window stays open with the report. PARTIAL keeps the window open with no pop-up. `-SelfTest` and `-Verify` never pop up or close. When the script has to open an elevated window, the original window already closes as soon as that window opens.
 
 `irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. The window asks for the print username. The format is last name + first initial, lowercase, for example `tsiogase` (the name on the copier, not the Windows logon). Leave the Printer properties window alone while it is open. The script closes it. The report is **INSTALL REPORT**.
 
@@ -408,7 +410,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.14 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.15 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |
