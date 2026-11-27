@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.9
+# Remax Secure Printer - Windows installer 1.2.10
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,7 +69,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.9'
+$script:Version = '1.2.10'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -2470,12 +2470,29 @@ function Resolve-CanonChoiceLabel {
     return $null
 }
 
+function ConvertTo-LooseLabel {
+    param([string]$Name)
+    $text = ConvertTo-CanonLabel $Name
+    if (-not $text) { return '' }
+    $text = $text.Replace('-', ' ')
+    $text = $text -replace '\s+', ' '
+    return $text.Trim()
+}
+
+function Test-LooseLabelEquals {
+    param([string]$Left, [string]$Right)
+    $a = (ConvertTo-LooseLabel $Left).ToLowerInvariant()
+    $b = (ConvertTo-LooseLabel $Right).ToLowerInvariant()
+    if (-not $a -or -not $b) { return $false }
+    return ($a -eq $b)
+}
+
 function Resolve-FinisherLabel {
     param([string[]]$Labels)
-    $exact = Resolve-CanonChoiceLabel -Labels $Labels -Accept @('Inner Finisher E1')
+    $exact = Resolve-CanonChoiceLabel -Labels $Labels -Accept @('Inner Finisher E1', 'Inner Finisher-E1')
     if ($exact) { return $exact }
     foreach ($label in @($Labels)) {
-        $norm = (ConvertTo-CanonLabel $label).ToLowerInvariant()
+        $norm = (ConvertTo-LooseLabel $label).ToLowerInvariant()
         if ($norm.Contains('inner finisher e1')) { return $label }
     }
     return $null
@@ -2773,12 +2790,12 @@ function Initialize-RemaxUi {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
     try { Add-Type -AssemblyName WindowsBase -ErrorAction Stop } catch { }
-    if (-not ('RemaxWin32' -as [type])) {
+    if (-not ('RemaxWin1210' -as [type])) {
         $win32 = @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class RemaxWin32 {
+public static class RemaxWin1210 {
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
     public static extern IntPtr SendMessageText(IntPtr hWnd, uint msg, IntPtr wParam, string text);
     [DllImport("user32.dll", EntryPoint="SendMessageW", CharSet=CharSet.Unicode)]
@@ -2856,11 +2873,35 @@ public static class RemaxWin32 {
     public static extern int GetDlgCtrlID(IntPtr hWnd);
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool BlockInput(bool fBlockIt);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+    [DllImport("kernel32.dll")]
+    public static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     public static bool TryBlockInput(bool block, out int error) {
         error = 0;
+        uint fgThread = 0;
+        uint fgPid = 0;
+        IntPtr fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero) {
+            fgThread = GetWindowThreadProcessId(fg, out fgPid);
+        }
+        uint mine = GetCurrentThreadId();
+        bool attached = false;
+        if (fgThread != 0) {
+            if (fgThread != mine) {
+                attached = AttachThreadInput(mine, fgThread, true);
+            }
+        }
         bool ok = BlockInput(block);
         if (!ok) {
-            error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            error = Marshal.GetLastWin32Error();
+        }
+        if (attached) {
+            AttachThreadInput(mine, fgThread, false);
         }
         return ok;
     }
@@ -2931,6 +2972,156 @@ public static class RemaxWin32 {
     }
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    static EnumWindowsProc EnumProc;
+    public static System.Collections.Generic.List<IntPtr> Hwnds = new System.Collections.Generic.List<IntPtr>();
+    public static bool CollectHwnd(IntPtr hWnd, IntPtr lParam) {
+        Hwnds.Add(hWnd);
+        return true;
+    }
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool EnumThreadWindows(uint dwThreadId, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr childAfter, string className, string windowName);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+    public static string WindowTitle(IntPtr hwnd) {
+        StringBuilder sb = new StringBuilder(512);
+        GetWindowText(hwnd, sb, 512);
+        return sb.ToString();
+    }
+    public static string WindowClass(IntPtr hwnd) {
+        StringBuilder sb = new StringBuilder(256);
+        GetClassName(hwnd, sb, 256);
+        return sb.ToString();
+    }
+    public static uint WindowPid(IntPtr hwnd) {
+        uint pid;
+        GetWindowThreadProcessId(hwnd, out pid);
+        return pid;
+    }
+    static void EnsureEnumProc() {
+        if (EnumProc == null) EnumProc = CollectHwnd;
+    }
+    public static IntPtr[] EnumTopLevel() {
+        Hwnds = new System.Collections.Generic.List<IntPtr>();
+        EnsureEnumProc();
+        EnumWindows(EnumProc, IntPtr.Zero);
+        return Hwnds.ToArray();
+    }
+    public static IntPtr[] EnumThread(IntPtr hwnd) {
+        Hwnds = new System.Collections.Generic.List<IntPtr>();
+        EnsureEnumProc();
+        uint pid;
+        uint thread = GetWindowThreadProcessId(hwnd, out pid);
+        if (thread != 0) EnumThreadWindows(thread, EnumProc, IntPtr.Zero);
+        return Hwnds.ToArray();
+    }
+    public static IntPtr[] ChildEdits(IntPtr parent) {
+        System.Collections.Generic.List<IntPtr> edits = new System.Collections.Generic.List<IntPtr>();
+        IntPtr child = IntPtr.Zero;
+        while (true) {
+            child = FindWindowEx(parent, child, null, null);
+            if (child == IntPtr.Zero) break;
+            string cls = WindowClass(child);
+            if (cls != null) {
+                if (cls.IndexOf("Edit", System.StringComparison.OrdinalIgnoreCase) >= 0) {
+                    edits.Add(child);
+                }
+            }
+            IntPtr nested = IntPtr.Zero;
+            while (true) {
+                nested = FindWindowEx(child, nested, null, null);
+                if (nested == IntPtr.Zero) break;
+                string ncls = WindowClass(nested);
+                if (ncls != null) {
+                    if (ncls.IndexOf("Edit", System.StringComparison.OrdinalIgnoreCase) >= 0) {
+                        edits.Add(nested);
+                    }
+                }
+            }
+        }
+        return edits.ToArray();
+    }
+    public static IntPtr TopEdit(IntPtr parent) {
+        IntPtr[] edits = ChildEdits(parent);
+        IntPtr best = IntPtr.Zero;
+        int bestTop = int.MaxValue;
+        foreach (IntPtr edit in edits) {
+            RECT rect;
+            if (!GetWindowRect(edit, out rect)) continue;
+            if (rect.Top < bestTop) {
+                bestTop = rect.Top;
+                best = edit;
+            }
+        }
+        return best;
+    }
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+    [DllImport("winspool.drv", SetLastError = true)]
+    public static extern bool ClosePrinter(IntPtr hPrinter);
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool GetPrinter(IntPtr hPrinter, uint Level, IntPtr pPrinter, uint cbBuf, out uint pcbNeeded);
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern bool SetPrinter(IntPtr hPrinter, uint Level, IntPtr pPrinter, uint Command);
+    public static int ApplyDevMode(string printer, byte[] devmode, uint level) {
+        IntPtr handle;
+        if (!OpenPrinter(printer, out handle, IntPtr.Zero)) return Marshal.GetLastWin32Error();
+        IntPtr raw = Marshal.AllocHGlobal(devmode.Length);
+        Marshal.Copy(devmode, 0, raw, devmode.Length);
+        try {
+            if (level == 8) {
+                IntPtr info8 = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(info8, raw);
+                bool ok8 = SetPrinter(handle, 8, info8, 0);
+                int err8 = ok8 ? 0 : Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(info8);
+                return err8;
+            }
+            if (level == 9) {
+                IntPtr info = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(info, raw);
+                bool ok = SetPrinter(handle, level, info, 0);
+                int err = ok ? 0 : Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(info);
+                return err;
+            }
+            if (level == 2) {
+                uint needed;
+                GetPrinter(handle, 2, IntPtr.Zero, 0, out needed);
+                if (needed == 0) return Marshal.GetLastWin32Error();
+                IntPtr buf = Marshal.AllocHGlobal((int)needed);
+                uint got;
+                if (!GetPrinter(handle, 2, buf, needed, out got)) {
+                    int err = Marshal.GetLastWin32Error();
+                    Marshal.FreeHGlobal(buf);
+                    return err;
+                }
+                Marshal.WriteIntPtr(buf, 7 * IntPtr.Size, raw);
+                bool ok2 = SetPrinter(handle, 2, buf, 0);
+                int err2 = ok2 ? 0 : Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(buf);
+                return err2;
+            }
+            return 87;
+        } finally {
+            ClosePrinter(handle);
+            Marshal.FreeHGlobal(raw);
+        }
+    }
     public static void TypeUnicode(string text) {
         if (string.IsNullOrEmpty(text)) return;
         INPUT[] inputs = new INPUT[text.Length * 2];
@@ -3022,7 +3213,7 @@ function Get-UiaSnapshot {
         try {
             $hwnd = [IntPtr]$Element.Current.NativeWindowHandle
             if ($hwnd -ne [IntPtr]::Zero) {
-                $state = [RemaxWin32]::ButtonCheck($hwnd)
+                $state = [RemaxWin1210]::ButtonCheck($hwnd)
                 if ($state -eq 1) { $toggle = 'On' } else { $toggle = 'Off' }
             }
         } catch { }
@@ -3041,7 +3232,7 @@ function Get-UiaSnapshot {
     if (-not $value -and $ctype -eq 'Edit') {
         try {
             $hwnd = [IntPtr]$Element.Current.NativeWindowHandle
-            if ($hwnd -ne [IntPtr]::Zero) { $value = [RemaxWin32]::WindowText($hwnd) }
+            if ($hwnd -ne [IntPtr]::Zero) { $value = [RemaxWin1210]::WindowText($hwnd) }
         } catch { }
     }
     return @{
@@ -3162,8 +3353,8 @@ function Show-CanonWindow {
     try {
         $hwnd = [IntPtr]$Window.Current.NativeWindowHandle
         if ($hwnd -ne [IntPtr]::Zero) {
-            [void][RemaxWin32]::ShowWindow($hwnd, 9)
-            [void][RemaxWin32]::SetForegroundWindow($hwnd)
+            [void][RemaxWin1210]::ShowWindow($hwnd, 9)
+            [void][RemaxWin1210]::SetForegroundWindow($hwnd)
         }
     } catch { }
 }
@@ -3178,7 +3369,7 @@ function Invoke-CanonButton {
         if ([int]$Snapshot.Bottom -le [int]$Snapshot.Top) { return $false }
         $x = [int](([int]$Snapshot.Left + [int]$Snapshot.Right) / 2)
         $y = [int](([int]$Snapshot.Top + [int]$Snapshot.Bottom) / 2)
-        [RemaxWin32]::ClickScreen($x, $y)
+        [RemaxWin1210]::ClickScreen($x, $y)
         return $true
     }
     if ($How -eq 'invoke') {
@@ -3192,7 +3383,7 @@ function Invoke-CanonButton {
         try { $hwnd = [IntPtr]$element.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
     }
     if ($hwnd -ne [IntPtr]::Zero) {
-        return [bool][RemaxWin32]::ClickHwnd($hwnd)
+        return [bool][RemaxWin1210]::ClickHwnd($hwnd)
     }
     if ($element -and ('RemaxUia' -as [type])) {
         [RemaxUia]::BeginInvoke($element)
@@ -3230,7 +3421,7 @@ function Set-CanonCheck {
         try {
             $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle
             if ($hwnd -ne [IntPtr]::Zero) {
-                $state = [RemaxWin32]::ButtonCheck($hwnd)
+                $state = [RemaxWin1210]::ButtonCheck($hwnd)
                 if ($state -eq 1) { $current = 'On' } else { $current = 'Off' }
             }
         } catch { }
@@ -3244,7 +3435,7 @@ function Set-CanonCheck {
         try {
             $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle
             if ($hwnd -ne [IntPtr]::Zero) {
-                $state = [RemaxWin32]::ButtonCheck($hwnd)
+                $state = [RemaxWin1210]::ButtonCheck($hwnd)
                 $got = 'Off'
                 if ($state -eq 1) { $got = 'On' }
                 return ($got -eq $want)
@@ -3266,8 +3457,8 @@ function Set-CanonEdit {
         } catch { }
         try {
             $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle
-            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
-                [void][RemaxWin32]::SetWindowTextTimed($hwnd, '')
+            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin1210' -as [type])) {
+                [void][RemaxWin1210]::SetWindowTextTimed($hwnd, '')
             }
         } catch { }
         return $true
@@ -3295,8 +3486,8 @@ function Read-LiveEditText {
         } catch { }
         try {
             $hwnd = [IntPtr]$Element.Current.NativeWindowHandle
-            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
-                $windowText = [string][RemaxWin32]::WindowTextTimed($hwnd)
+            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin1210' -as [type])) {
+                $windowText = [string][RemaxWin1210]::WindowTextTimed($hwnd)
             }
         } catch { }
     }
@@ -3331,10 +3522,10 @@ function Set-UserNameEditText {
     } catch {
         Write-Remax ("User Name ValuePattern.SetValue failed: " + $_.Exception.Message)
     }
-    if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
+    if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin1210' -as [type])) {
         $posted = $false
-        try { $posted = [bool][RemaxWin32]::SetWindowTextTimed($hwnd, $Text) } catch { $posted = $false }
-        try { [RemaxWin32]::NotifyEditChange($hwnd) } catch { }
+        try { $posted = [bool][RemaxWin1210]::SetWindowTextTimed($hwnd, $Text) } catch { $posted = $false }
+        try { [RemaxWin1210]::NotifyEditChange($hwnd) } catch { }
         Start-Sleep -Milliseconds 150
         $read = Read-LiveEditText $element
         Write-Remax ("User Name method WM_SETTEXT posted=" + $posted + " read-back pattern='" + $read.Pattern + "' window='" + $read.Window + "'")
@@ -3348,11 +3539,11 @@ function Set-UserNameEditText {
         try { $paused = Suspend-InputLock } catch { $paused = $false }
         try {
             Write-Remax "Input lock released so User Name keystrokes are not swallowed."
-            [void][RemaxWin32]::SetFocus($hwnd)
+            [void][RemaxWin1210]::SetFocus($hwnd)
             Start-Sleep -Milliseconds 100
-            [RemaxWin32]::SelectAllKeys
+            [RemaxWin1210]::SelectAllKeys
             Start-Sleep -Milliseconds 80
-            [RemaxWin32]::TypeUnicode($Text)
+            [RemaxWin1210]::TypeUnicode($Text)
             Start-Sleep -Milliseconds 200
         } catch {
             Write-Remax ("User Name SendInput failed: " + $_.Exception.Message)
@@ -3654,7 +3845,7 @@ function Wait-WindowClosed {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
     while ([DateTime]::UtcNow -lt $deadline) {
         $alive = $false
-        try { $alive = [bool][RemaxWin32]::IsWindow($Handle) } catch { $alive = $false }
+        try { $alive = [bool][RemaxWin1210]::IsWindow($Handle) } catch { $alive = $false }
         if (-not $alive) { return $true }
         Start-Sleep -Milliseconds 200
     }
@@ -3759,32 +3950,86 @@ function Find-UserNameOffsets {
     return @($hits.ToArray())
 }
 
+function Find-UserNameHits {
+    param([byte[]]$Data, [string]$Name)
+    $hits = New-Object System.Collections.Generic.List[object]
+    if ($null -eq $Data -or [string]::IsNullOrWhiteSpace($Name)) { return @() }
+    $want = $Name.ToLowerInvariant()
+    $limit = $Data.Length - $want.Length
+    for ($i = 0; $i -le $limit; $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $want.Length; $j++) {
+            $b = [int]$Data[$i + $j]
+            if ($b -ge 65 -and $b -le 90) { $b = $b + 32 }
+            if ($b -ne [int][char]$want[$j]) { $ok = $false; break }
+        }
+        if (-not $ok) { continue }
+        $field = $want.Length
+        while ($field -lt 32 -and ($i + $field) -lt $Data.Length -and $Data[$i + $field] -eq 0) { $field = $field + 1 }
+        [void]$hits.Add(@{ Offset = $i; Encoding = 'ASCII'; FieldChars = $field })
+        $i = $i + $want.Length - 1
+    }
+    $chars = $want.Length
+    $need = $chars * 2
+    $limit16 = $Data.Length - $need
+    for ($i = 0; $i -le $limit16; $i++) {
+        $ok = $true
+        for ($j = 0; $j -lt $chars; $j++) {
+            $lo = [int]$Data[$i + ($j * 2)]
+            $hi = [int]$Data[$i + ($j * 2) + 1]
+            if ($hi -ne 0) { $ok = $false; break }
+            if ($lo -ge 65 -and $lo -le 90) { $lo = $lo + 32 }
+            if ($lo -ne [int][char]$want[$j]) { $ok = $false; break }
+        }
+        if (-not $ok) { continue }
+        $field = $chars
+        while ($field -lt 32 -and ($i + ($field * 2) + 1) -lt $Data.Length -and $Data[$i + ($field * 2)] -eq 0 -and $Data[$i + ($field * 2) + 1] -eq 0) {
+            $field = $field + 1
+        }
+        [void]$hits.Add(@{ Offset = $i; Encoding = 'UTF-16'; FieldChars = $field })
+        $i = $i + $need - 1
+    }
+    return @($hits.ToArray())
+}
+
+function Write-NameIntoField {
+    param([byte[]]$Data, $Hit, [string]$NewName)
+    $copy = New-Object byte[] $Data.Length
+    [System.Array]::Copy($Data, $copy, $Data.Length)
+    $field = [int]$Hit.FieldChars
+    if ($field -gt 32) { $field = 32 }
+    if ($NewName.Length -gt $field) { return @{ Bytes = $copy; Ok = $false } }
+    $offset = [int]$Hit.Offset
+    if ($Hit.Encoding -eq 'UTF-16') {
+        $span = $field * 2
+        for ($j = 0; $j -lt $span; $j++) { $copy[$offset + $j] = 0 }
+        $raw = [System.Text.Encoding]::Unicode.GetBytes($NewName)
+        [System.Array]::Copy($raw, 0, $copy, $offset, $raw.Length)
+    } else {
+        for ($j = 0; $j -lt $field; $j++) { $copy[$offset + $j] = 0 }
+        $raw = [System.Text.Encoding]::ASCII.GetBytes($NewName)
+        [System.Array]::Copy($raw, 0, $copy, $offset, $raw.Length)
+    }
+    return @{ Bytes = $copy; Ok = $true }
+}
+
 function Replace-UserNameBytes {
     param([byte[]]$Data, [string]$OldName, [string]$NewName)
     $copy = New-Object byte[] $Data.Length
     [System.Array]::Copy($Data, $copy, $Data.Length)
     $count = 0
     $skipped = 0
-    foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
-        $newBytes = $null
-        foreach ($item in @(Get-UserNameBytePatterns $NewName)) {
-            if ($item.Encoding -eq $pat.Encoding) { $newBytes = $item.Bytes }
+    $hits = @(Find-UserNameHits -Data $copy -Name $OldName)
+    foreach ($hit in @($hits)) {
+        $next = Write-NameIntoField -Data $copy -Hit $hit -NewName $NewName
+        if (-not $next.Ok) {
+            $skipped = $skipped + 1
+            continue
         }
-        if ($null -eq $newBytes) { continue }
-        $offsets = @(Find-UserNameOffsets -Data $copy -Needle $pat.Bytes)
-        foreach ($offset in @($offsets)) {
-            if ($newBytes.Length -gt $pat.Bytes.Length) {
-                $skipped = $skipped + 1
-                continue
-            }
-            for ($j = 0; $j -lt $pat.Bytes.Length; $j++) { $copy[$offset + $j] = 0 }
-            if ($newBytes.Length -gt 0) {
-                [System.Array]::Copy($newBytes, 0, $copy, [int]$offset, $newBytes.Length)
-            }
-            $count = $count + 1
-        }
+        $copy = $next.Bytes
+        $count = $count + 1
     }
-    return @{ Bytes = $copy; Count = $count; Skipped = $skipped }
+    return @{ Bytes = $copy; Count = $count; Skipped = $skipped; Hits = @($hits) }
 }
 
 function Get-UserNameRegistryRoots {
@@ -3842,17 +4087,17 @@ function Write-UserNameProbe {
         if ($null -ne $bytes) {
             $length = $bytes.Length
             if ($OldName) {
-                foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
-                    $count = @(Find-UserNameOffsets -Data $bytes -Needle $pat.Bytes).Count
-                    if ($pat.Encoding -eq 'ASCII') { $asciiHits = $count }
-                    if ($pat.Encoding -eq 'UTF-16') { $utfHits = $count }
+                foreach ($hit in @(Find-UserNameHits -Data $bytes -Name $OldName)) {
+                    if ($hit.Encoding -eq 'ASCII') { $asciiHits = $asciiHits + 1 }
+                    if ($hit.Encoding -eq 'UTF-16') { $utfHits = $utfHits + 1 }
+                    Write-Remax ("User name probe hit " + $hit.Encoding + " offset " + $hit.Offset + " field " + $hit.FieldChars + " in " + $where)
                 }
             }
         } elseif ($raw -is [string]) {
             $length = ([string]$raw).Length
-            if ($OldName -and ([string]$raw).Contains($OldName)) { $asciiHits = 1 }
+            if ($OldName -and ([string]$raw).ToLowerInvariant().Contains($OldName.ToLowerInvariant())) { $asciiHits = 1 }
         }
-        Write-Remax ("User name probe " + $where + ": " + $length + " bytes, ASCII '" + $OldName + "' hits " + $asciiHits + ", UTF-16 hits " + $utfHits)
+        Write-Remax ("User name probe " + $where + ": " + $length + " bytes, ASCII hits " + $asciiHits + ", UTF-16 hits " + $utfHits)
     }
 }
 
@@ -3888,11 +4133,11 @@ function Write-UserNameRegistryHits {
                 try { $raw = $item.GetValue($valueName) } catch { $raw = $null }
                 $where = $item.PSPath + ' value ' + $label
                 if ($raw -is [string]) {
-                    if ($raw.Contains($OldName)) {
+                    if ($raw.ToLowerInvariant().Contains($OldName.ToLowerInvariant())) {
                         $hits = $hits + 1
-                        Write-Remax ("Registry string contains '" + $OldName + "': " + $where)
+                        Write-Remax ("Registry string contains '" + $OldName + "' ignoring case: " + $where)
                         if ($Write -and $NewName) {
-                            $updated = $raw.Replace($OldName, $NewName)
+                            $updated = [regex]::Replace($raw, [regex]::Escape($OldName), $NewName, 'IgnoreCase')
                             try {
                                 $item.SetValue($valueName, $updated)
                                 $replaced = $replaced + 1
@@ -3906,12 +4151,10 @@ function Write-UserNameRegistryHits {
                 }
                 $bytes = $raw -as [byte[]]
                 if ($null -eq $bytes -or $bytes.Length -eq 0) { continue }
-                foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
-                    $found = @(Find-UserNameOffsets -Data $bytes -Needle $pat.Bytes)
-                    if ($found.Count -gt 0) {
-                        $hits = $hits + 1
-                        Write-Remax ("Registry value contains " + $pat.Encoding + " '" + $OldName + "' (" + $found.Count + ") at " + $where)
-                    }
+                $foundHits = @(Find-UserNameHits -Data $bytes -Name $OldName)
+                foreach ($hit in @($foundHits)) {
+                    $hits = $hits + 1
+                    Write-Remax ("Registry value contains " + $hit.Encoding + " name at offset " + $hit.Offset + " field " + $hit.FieldChars + " chars in " + $where)
                 }
                 if ($Write -and $NewName) {
                     $swap = Replace-UserNameBytes -Data $bytes -OldName $OldName -NewName $NewName
@@ -3938,6 +4181,45 @@ function Write-UserNameRegistryHits {
     return @{ Hits = $hits; Replaced = $replaced }
 }
 
+function Invoke-UserNameDevModePatch {
+    param([string]$PrintUser)
+    if (-not ('RemaxWin1210' -as [type])) {
+        Write-Remax "SetPrinter skipped. Win32 helper is not loaded."
+        return $false
+    }
+    $blobs = New-Object System.Collections.Generic.List[byte[]]
+    foreach ($target in @(Get-UserNameProbeTargets)) {
+        if (-not (Test-Path -LiteralPath $target.Path)) { continue }
+        $item = $null
+        try { $item = Get-Item -LiteralPath $target.Path } catch { $item = $null }
+        if (-not $item) { continue }
+        $raw = $null
+        try { $raw = $item.GetValue($target.Value) } catch { $raw = $null }
+        $bytes = $raw -as [byte[]]
+        if ($bytes -and $bytes.Length -gt 0) { [void]$blobs.Add($bytes) }
+    }
+    if ($blobs.Count -eq 0) {
+        Write-Remax "SetPrinter skipped. No Default DevMode or per-user DevMode blob was readable."
+        return $false
+    }
+    $devmode = $blobs[0]
+    foreach ($level in @(8, 9, 2)) {
+        try {
+            $err = [int][RemaxWin1210]::ApplyDevMode($script:PrinterName, [byte[]]$devmode, [uint32]$level)
+            Write-Remax ("SetPrinter level " + $level + " GetLastError " + $err)
+        } catch {
+            Write-Remax ("SetPrinter level " + $level + " failed: " + $_.Exception.Message)
+        }
+    }
+    $check = @(Find-UserNameHits -Data $devmode -Name $PrintUser)
+    if ($check.Count -gt 0) {
+        Write-Remax ("DevMode patch verified. '" + $PrintUser + "' is in the blob at offset " + $check[0].Offset + " " + $check[0].Encoding)
+        return $true
+    }
+    Write-Remax ("DevMode patch was sent. '" + $PrintUser + "' was not found in the blob afterwards, so the dialog remains the check.")
+    return $false
+}
+
 function Read-UserNameEditValue {
     param($Elements)
     $edit = Find-CanonEditByLabel -Elements $Elements -Labels @('User Name')
@@ -3961,6 +4243,110 @@ function Test-UserNameBudget {
     return ([DateTime]::UtcNow -lt $script:UserNameDeadline)
 }
 
+function Write-WindowCandidate {
+    param([IntPtr]$Hwnd)
+    if ($Hwnd -eq [IntPtr]::Zero) { return '' }
+    if (-not ('RemaxWin1210' -as [type])) { return '' }
+    $title = ''
+    $class = ''
+    $pid = 0
+    try { $title = [string][RemaxWin1210]::WindowTitle($Hwnd) } catch { $title = '' }
+    try { $class = [string][RemaxWin1210]::WindowClass($Hwnd) } catch { $class = '' }
+    try { $pid = [int][RemaxWin1210]::WindowPid($Hwnd) } catch { $pid = 0 }
+    if ([string]::IsNullOrWhiteSpace($title)) { return '' }
+    $proc = ''
+    if ($pid -gt 0) {
+        try { $proc = [string](Get-Process -Id $pid -ErrorAction Stop).ProcessName } catch { $proc = '' }
+    }
+    Write-Remax ("Window hwnd=" + $Hwnd + " pid=" + $pid + " process=" + $proc + " class=" + $class + " title='" + $title + "'")
+    return $title
+}
+
+function Test-WindowTitleMatch {
+    param([string]$Title, [string]$TitleLike, [string[]]$TitleAny)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
+    if ($TitleAny -and @($TitleAny).Count -gt 0) {
+        foreach ($pat in @($TitleAny)) {
+            if ($Title -like [string]$pat) { return $true }
+        }
+        return $false
+    }
+    if ($TitleLike) { return ($Title -like $TitleLike) }
+    return $false
+}
+
+function Find-TitledWindow {
+    param([IntPtr]$PropsHwnd, [string]$TitleLike, [string[]]$TitleAny, [int]$TimeoutMs)
+    if (-not ('RemaxWin1210' -as [type])) { return $null }
+    if ($TimeoutMs -gt 10000) { $TimeoutMs = 10000 }
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMs)
+    $seen = @{}
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $hwnds = New-Object System.Collections.Generic.List[IntPtr]
+        try {
+            foreach ($hwnd in @([RemaxWin1210]::EnumTopLevel())) {
+                if ($hwnd -ne [IntPtr]::Zero) { [void]$hwnds.Add($hwnd) }
+            }
+        } catch { }
+        if ($PropsHwnd -ne [IntPtr]::Zero) {
+            try {
+                $popup = [RemaxWin1210]::GetWindow($PropsHwnd, 6)
+                if ($popup -ne [IntPtr]::Zero) { [void]$hwnds.Add($popup) }
+            } catch { }
+            try {
+                foreach ($hwnd in @([RemaxWin1210]::EnumThread($PropsHwnd))) {
+                    if ($hwnd -ne [IntPtr]::Zero) { [void]$hwnds.Add($hwnd) }
+                }
+            } catch { }
+        }
+        foreach ($hwnd in @($hwnds.ToArray())) {
+            $key = [string]$hwnd
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $title = Write-WindowCandidate $hwnd
+            if (Test-WindowTitleMatch -Title $title -TitleLike $TitleLike -TitleAny $TitleAny) {
+                return @{ Hwnd = $hwnd; Title = $title }
+            }
+        }
+        try {
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+            $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+            foreach ($window in @($windows)) {
+                if (-not $window) { continue }
+                $hwnd = [IntPtr]::Zero
+                try { $hwnd = [IntPtr]$window.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
+                if ($hwnd -eq [IntPtr]::Zero) { continue }
+                $key = [string]$hwnd
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $title = Write-WindowCandidate $hwnd
+                if (Test-WindowTitleMatch -Title $title -TitleLike $TitleLike -TitleAny $TitleAny) {
+                    return @{ Hwnd = $hwnd; Title = $title }
+                }
+            }
+        } catch { }
+        if ($PropsHwnd -ne [IntPtr]::Zero) {
+            try {
+                $props = [System.Windows.Automation.AutomationElement]::FromHandle($PropsHwnd)
+                $desc = $props.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
+                foreach ($node in @($desc)) {
+                    if (-not $node) { continue }
+                    $name = ''
+                    try { $name = [string]$node.Current.Name } catch { $name = '' }
+                    if (-not (Test-WindowTitleMatch -Title $name -TitleLike $TitleLike -TitleAny $TitleAny)) { continue }
+                    $hwnd = [IntPtr]::Zero
+                    try { $hwnd = [IntPtr]$node.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
+                    if ($hwnd -eq [IntPtr]::Zero) { continue }
+                    Write-Remax ("Descendant match hwnd=" + $hwnd + " title='" + $name + "'")
+                    return @{ Hwnd = $hwnd; Title = $name }
+                }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    return $null
+}
+
 function Open-ChildDialogFast {
     param($Button, [int]$ProcessId, $Exclude, [string]$TitleLike, [string[]]$TitleAny)
     if (-not $Button) { return $null }
@@ -3968,13 +4354,24 @@ function Open-ChildDialogFast {
         Write-Remax "Username stage exceeded 60 seconds before opening a dialog."
         return $null
     }
+    $props = [IntPtr]::Zero
+    if ($Exclude) {
+        foreach ($item in @($Exclude)) {
+            try { $props = [IntPtr]$item } catch { $props = [IntPtr]::Zero }
+            if ($props -ne [IntPtr]::Zero) { break }
+        }
+    }
     [void](Invoke-CanonButton -Snapshot $Button -How post)
-    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs (Get-UserNameWaitMs 10000) -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny
-    if ($dlg) { return $dlg }
+    $found = Find-TitledWindow -PropsHwnd $props -TitleLike $TitleLike -TitleAny $TitleAny -TimeoutMs (Get-UserNameWaitMs 10000)
+    if ($found) {
+        try { return [System.Windows.Automation.AutomationElement]::FromHandle($found.Hwnd) } catch { return $null }
+    }
     if (-not (Test-UserNameBudget)) { return $null }
     Write-Remax "Dialog did not open after BM_CLICK. Trying a background invoke."
     [void](Invoke-CanonButton -Snapshot $Button -How invoke)
-    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs (Get-UserNameWaitMs 10000) -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny)
+    $found = Find-TitledWindow -PropsHwnd $props -TitleLike $TitleLike -TitleAny $TitleAny -TimeoutMs (Get-UserNameWaitMs 10000)
+    if (-not $found) { return $null }
+    try { return [System.Windows.Automation.AutomationElement]::FromHandle($found.Hwnd) } catch { return $null }
 }
 
 function Close-UserDialog {
@@ -3995,17 +4392,17 @@ function Close-UserDialog {
     if ($handle -eq [IntPtr]::Zero) { return }
     if (Wait-WindowClosed -Handle $handle -TimeoutMs (Get-UserNameWaitMs 10000)) { return }
     Write-Remax "Dialog did not close within 10 seconds. Sending WM_CLOSE."
-    if ('RemaxWin32' -as [type]) {
-        try { [RemaxWin32]::CloseWindow($handle) } catch { }
+    if ('RemaxWin1210' -as [type]) {
+        try { [RemaxWin1210]::CloseWindow($handle) } catch { }
     }
     if (Wait-WindowClosed -Handle $handle -TimeoutMs (Get-UserNameWaitMs 2000)) { return }
     Write-Remax "Dialog still open. Sending Escape."
     $paused = $false
     try { $paused = Suspend-InputLock } catch { $paused = $false }
     try {
-        if ('RemaxWin32' -as [type]) {
-            [void][RemaxWin32]::SetFocus($handle)
-            [RemaxWin32]::TapEscape
+        if ('RemaxWin1210' -as [type]) {
+            [void][RemaxWin1210]::SetFocus($handle)
+            [RemaxWin1210]::TapEscape
         }
     } catch { }
     finally {
@@ -4039,6 +4436,23 @@ function Update-DefaultValueDialog {
         Write-UiaSummary $elements
         if (-not $ReadOnly) {
             $edit = Find-CanonEditByLabel -Elements $elements -Labels @('User Name')
+            if (-not $edit -and ('RemaxWin1210' -as [type])) {
+                $dlgHwnd = [IntPtr]::Zero
+                try { $dlgHwnd = [IntPtr]$dlg.Current.NativeWindowHandle } catch { $dlgHwnd = [IntPtr]::Zero }
+                $editHwnd = [IntPtr]::Zero
+                if ($dlgHwnd -ne [IntPtr]::Zero) {
+                    try { $editHwnd = [RemaxWin1210]::TopEdit($dlgHwnd) } catch { $editHwnd = [IntPtr]::Zero }
+                }
+                if ($editHwnd -ne [IntPtr]::Zero) {
+                    Write-Remax ("User Name edit located by FindWindowEx hwnd=" + $editHwnd)
+                    try {
+                        $editEl = [System.Windows.Automation.AutomationElement]::FromHandle($editHwnd)
+                        $edit = Get-UiaSnapshot $editEl
+                    } catch {
+                        Write-Remax ("User Name edit handle could not be wrapped: " + $_.Exception.Message)
+                    }
+                }
+            }
             if ($edit) {
                 $wrote = Set-UserNameEditText -Snapshot $edit -Text $PrintUser
                 Write-Remax ("User Information Settings User Name method " + $wrote.Method + " read-back '" + $wrote.Value + "'")
@@ -4148,6 +4562,7 @@ function Test-ComboTextMatches {
     param([string]$Text, [string]$Want)
     if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Want)) { return $false }
     if (Test-CanonLabelEquals $Text $Want) { return $true }
+    if (Test-LooseLabelEquals $Text $Want) { return $true }
     $wantFinisher = Resolve-FinisherLabel -Labels @($Want)
     $textFinisher = Resolve-FinisherLabel -Labels @($Text)
     if ($wantFinisher -and $textFinisher) { return $true }
@@ -4157,17 +4572,21 @@ function Test-ComboTextMatches {
 function Set-Win32ComboValue {
     param($Snapshot, [string]$Want)
     if (-not $Snapshot -or -not $Snapshot.Element) { return $false }
-    if (-not ('RemaxWin32' -as [type])) { return $false }
+    if (-not ('RemaxWin1210' -as [type])) { return $false }
     $hwnd = [IntPtr]::Zero
     try { $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
     if ($hwnd -eq [IntPtr]::Zero) { return $false }
-    $index = [RemaxWin32]::ComboFindExact($hwnd, $Want)
+    $index = [RemaxWin1210]::ComboFindExact($hwnd, $Want)
+    if ($index -lt 0 -and (Test-LooseLabelEquals $Want 'Inner Finisher E1')) {
+        $index = [RemaxWin1210]::ComboFindExact($hwnd, 'Inner Finisher-E1')
+        if ($index -lt 0) { $index = [RemaxWin1210]::ComboFindExact($hwnd, 'Inner Finisher E1') }
+    }
     if ($index -ge 0) {
-        [void][RemaxWin32]::ComboSetCurSel($hwnd, $index)
-        [RemaxWin32]::NotifySelChange($hwnd)
+        [void][RemaxWin1210]::ComboSetCurSel($hwnd, $index)
+        [RemaxWin1210]::NotifySelChange($hwnd)
         Start-Sleep -Milliseconds 250
-        $shown = [RemaxWin32]::ComboGetLbText($hwnd, $index)
-        if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
+        $shown = [RemaxWin1210]::ComboGetLbText($hwnd, $index)
+        if (-not $shown) { $shown = [RemaxWin1210]::WindowText($hwnd) }
         Write-Remax ("CB_SETCURSEL " + $index + " text '" + $shown + "'")
         if (Test-ComboTextMatches $shown $Want) { return $true }
         if (Test-CanonLabelEquals $shown $Want) { return $true }
@@ -4176,27 +4595,27 @@ function Set-Win32ComboValue {
     $paused = Suspend-InputLock
     $landed = $false
     try {
-        [void][RemaxWin32]::SetFocus($hwnd)
+        [void][RemaxWin1210]::SetFocus($hwnd)
         Start-Sleep -Milliseconds 150
-        [RemaxWin32]::TapKey(0x24)
+        [RemaxWin1210]::TapKey(0x24)
         Start-Sleep -Milliseconds 150
         $step = 0
         while ($step -lt 24) {
-            $cur = [RemaxWin32]::ComboGetCurSel($hwnd)
+            $cur = [RemaxWin1210]::ComboGetCurSel($hwnd)
             $shown = ''
-            if ($cur -ge 0) { $shown = [RemaxWin32]::ComboGetLbText($hwnd, $cur) }
-            if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
+            if ($cur -ge 0) { $shown = [RemaxWin1210]::ComboGetLbText($hwnd, $cur) }
+            if (-not $shown) { $shown = [RemaxWin1210]::WindowText($hwnd) }
             if (Test-ComboTextMatches $shown $Want) {
-                [RemaxWin32]::NotifySelChange($hwnd)
+                [RemaxWin1210]::NotifySelChange($hwnd)
                 Write-Remax ("Key selection landed on '" + $shown + "'")
                 $landed = $true
                 break
             }
-            [RemaxWin32]::TapKey(0x28)
+            [RemaxWin1210]::TapKey(0x28)
             Start-Sleep -Milliseconds 120
             $step = $step + 1
         }
-        if (-not $landed) { [RemaxWin32]::NotifySelChange($hwnd) }
+        if (-not $landed) { [RemaxWin1210]::NotifySelChange($hwnd) }
     } finally {
         if ($paused) { Resume-InputLock }
     }
@@ -4934,6 +5353,9 @@ function Invoke-RemaxDeviceSettings {
     Write-Remax ("Looking for exported print username '" + $script:ExportedPrintUser + "' in PrinterDriverData and per-user DevMode.")
     try {
         [void](Write-UserNameRegistryHits -OldName $script:ExportedPrintUser -NewName $PrintUser -Write)
+        try { [void](Invoke-UserNameDevModePatch -PrintUser $PrintUser) } catch {
+            Write-Remax ("SetPrinter DevMode patch failed: " + $_.Exception.Message)
+        }
     } catch {
         Write-Remax ("Registry user name replace failed: " + $_.Exception.Message)
     }
@@ -4969,13 +5391,25 @@ public static class RemaxUserNameWatch {
     public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
 }
 "@
         try { Add-Type -TypeDefinition $definition -Language CSharp } catch { }
         try { [void][RemaxUserNameWatch]::BlockInput($false) } catch { }
         try {
             $hwnd = [RemaxUserNameWatch]::GetForegroundWindow()
+            $title = ''
             if ($hwnd -ne [IntPtr]::Zero) {
+                $sb = New-Object System.Text.StringBuilder 512
+                [void][RemaxUserNameWatch]::GetWindowText($hwnd, $sb, 512)
+                $title = $sb.ToString()
+            }
+            $keep = $false
+            if ($title -like '*User Information Settings*') { $keep = $true }
+            if ($title -like '*Default Value Settings*') { $keep = $true }
+            if ($title -like '*Properties*') { $keep = $true }
+            if (-not $keep -and $hwnd -ne [IntPtr]::Zero) {
                 [void][RemaxUserNameWatch]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
             }
         } catch { }
@@ -5112,8 +5546,8 @@ function Exit-InputLock {
     if (-not $script:InputLocked) { return }
     $script:InputLocked = $false
     $script:InputLockSuspended = $false
-    if (-not ('RemaxWin32' -as [type])) { return }
-    try { [void][RemaxWin32]::BlockInput($false) } catch { }
+    if (-not ('RemaxWin1210' -as [type])) { return }
+    try { [void][RemaxWin1210]::BlockInput($false) } catch { }
 }
 
 function Enter-InputLock {
@@ -5127,9 +5561,9 @@ function Enter-InputLock {
     Start-InputUnlockWatchdog
     $locked = $false
     $lockError = 0
-    if ('RemaxWin32' -as [type]) {
+    if ('RemaxWin1210' -as [type]) {
         try {
-            $locked = [bool][RemaxWin32]::TryBlockInput($true, [ref]$lockError)
+            $locked = [bool][RemaxWin1210]::TryBlockInput($true, [ref]$lockError)
         } catch {
             $locked = $false
         }
@@ -5146,9 +5580,9 @@ function Enter-InputLock {
 
 function Suspend-InputLock {
     if (-not $script:InputLocked) { return $false }
-    if (-not ('RemaxWin32' -as [type])) { return $false }
+    if (-not ('RemaxWin1210' -as [type])) { return $false }
     try {
-        [void][RemaxWin32]::BlockInput($false)
+        [void][RemaxWin1210]::BlockInput($false)
         $script:InputLockSuspended = $true
         Write-Remax 'Input lock paused so combo keystrokes can be sent.'
         return $true
@@ -5160,10 +5594,10 @@ function Suspend-InputLock {
 function Resume-InputLock {
     if (-not $script:InputLockSuspended) { return }
     $script:InputLockSuspended = $false
-    if (-not ('RemaxWin32' -as [type])) { return }
+    if (-not ('RemaxWin1210' -as [type])) { return }
     try {
         $lockError = 0
-        $locked = [bool][RemaxWin32]::TryBlockInput($true, [ref]$lockError)
+        $locked = [bool][RemaxWin1210]::TryBlockInput($true, [ref]$lockError)
         $script:InputLocked = $locked
         if (-not $locked) {
             Write-Remax ('BlockInput returned false while restoring the input lock. GetLastError ' + $lockError + '.')
@@ -6880,7 +7314,19 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.9') 'version string is 1.2.9'
+    Assert-Remax ($script:Version -eq '1.2.10') 'version string is 1.2.10'
+    $mixedName = [byte[]](84, 115, 105, 111, 103, 97, 115, 101, 0, 0)
+    $mixedHits = @(Find-UserNameHits -Data $mixedName -Name 'tsiogase')
+    Assert-Remax ($mixedHits.Count -ge 1 -and $mixedHits[0].Encoding -eq 'ASCII' -and [int]$mixedHits[0].Offset -eq 0) 'Tsiogase matches a lowercase probe'
+    $mixedWrite = Write-NameIntoField -Data $mixedName -Hit $mixedHits[0] -NewName 'johns'
+    Assert-Remax ($mixedWrite.Ok -and $mixedWrite.Bytes[0] -eq 106 -and $mixedWrite.Bytes[5] -eq 0) 'johns is written and the rest of the field is zero'
+    $utfName = [System.Text.Encoding]::Unicode.GetBytes('Tsiogase')
+    $utfHits = @(Find-UserNameHits -Data $utfName -Name 'tsiogase')
+    $utfHit = $null
+    foreach ($hit in @($utfHits)) { if ($hit.Encoding -eq 'UTF-16') { $utfHit = $hit } }
+    Assert-Remax ($null -ne $utfHit) 'UTF-16 Tsiogase matches a lowercase probe'
+    Assert-Remax ((Resolve-FinisherLabel -Labels @('None', 'Inner Finisher-E1')) -eq 'Inner Finisher-E1') 'Inner Finisher-E1 matches Inner Finisher E1'
+    Assert-Remax (Test-LooseLabelEquals 'Inner Finisher-E1' 'Inner Finisher E1') 'hyphen and space are the same finisher label'
     Assert-Remax ((Get-EditChangeWParam 1001) -eq 50332649) 'EN_CHANGE notice includes the control id'
     Assert-Remax (Test-UserNameMatch 'Tsiogase' 'tsiogase') 'user name read-back ignores case'
     Assert-Remax (-not (Test-UserNameMatch 'Tsiogase' 'johns')) 'Tsiogase is not johns'

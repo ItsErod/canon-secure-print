@@ -106,7 +106,10 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.9",
+        "1.2.10",
+        "RemaxWin1210",
+        "Find-TitledWindow",
+        "ApplyDevMode",
         "TypeUnicode",
         "NotifyEditChange",
         "SendMessageTimeout",
