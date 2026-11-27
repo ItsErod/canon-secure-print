@@ -29,7 +29,9 @@ fi
 set -u
 set -o pipefail
 
-VERSION="1.1.0"
+VERSION="1.2.11"
+INGEST_URL="https://tickets.rmxofficetools.com/api/public/printer-installs"
+INGEST_KEY_DEFAULT="__REMAX_INGEST_KEY__"
 RAW_INSTALL_URL="https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh"
 
 # Proprietary Canon PS driver. Not stored in this repo.
@@ -107,6 +109,135 @@ report_line() {
   if [[ -n "${LOG:-}" ]]; then
     printf '%s\n' "$*" >> "$LOG"
   fi
+  if [[ -n "${REPORT_FILE:-}" ]]; then
+    printf '%s\n' "$*" >> "$REPORT_FILE"
+  fi
+}
+
+report_install() {
+  if [[ "${REMAX_NO_REPORT:-}" == "1" ]]; then
+    report_line "REPORTED:    SKIP  REMAX_NO_REPORT=1"
+    return 0
+  fi
+  local key="${REMAX_INGEST_KEY:-$INGEST_KEY_DEFAULT}"
+  local payload body http_code iface ip mac ssid net os_name os_ver os_text computer
+  payload="${WORKDIR:-/tmp}/remax-install-report.json"
+  body="${WORKDIR:-/tmp}/remax-install-report.body"
+  iface="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+  ip=""
+  mac=""
+  if [[ -n "$iface" ]]; then
+    ip="$(ipconfig getifaddr "$iface" 2>/dev/null || true)"
+    mac="$(ifconfig "$iface" 2>/dev/null | awk '/ether /{print $2; exit}')"
+  fi
+  ssid="$(networksetup -getairportnetwork "${iface:-en0}" 2>/dev/null | sed 's/^Current Wi-Fi Network: //')"
+  ssid_lc="$(printf '%s' "$ssid" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$ssid_lc" == "remax" ]]; then
+    net="REMAX"
+  else
+    net="OTHER"
+  fi
+  os_name="$(sw_vers -productName 2>/dev/null || echo macOS)"
+  os_ver="$(sw_vers -productVersion 2>/dev/null || true)"
+  os_text="${os_name} ${os_ver}"
+  computer="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  REMAX_REPORT_RESULT="$(overall_pass && printf PASS || printf FAIL)" \
+  REMAX_STEP_DRIVER="${R_DRIVER:-}" \
+  REMAX_STEP_CASSETTE="${R_CASSETTE:-}" \
+  REMAX_STEP_FINISHER="${R_FINISHER:-}" \
+  REMAX_STEP_SIDES="${R_SIDES:-}" \
+  REMAX_STEP_ENTER="${R_ENTER:-}" \
+  REMAX_STEP_QUEUE="${R_QUEUE:-}" \
+  REMAX_STEP_URI="${R_URI:-}" \
+  REMAX_STEP_STALE="${R_STALE:-}" \
+  REMAX_REPORT_PRINT_USER="${PRINT_USER:-}" \
+  REMAX_REPORT_COMPUTER="$computer" \
+  REMAX_REPORT_OS="$os_text" \
+  REMAX_REPORT_OS_USER="${CONSOLE_USER:-$(id -un)}" \
+  REMAX_REPORT_IP="$ip" \
+  REMAX_REPORT_MAC="$mac" \
+  REMAX_REPORT_NETWORK="$net" \
+  REMAX_REPORT_VERSION="$VERSION" \
+  perl - "$payload" "${REPORT_FILE:-}" "${LOG:-}" <<'PERL'
+use strict;
+use warnings;
+my ($out, $report_path, $log_path) = @ARGV;
+sub j {
+  my ($s) = @_;
+  $s = '' unless defined $s;
+  $s =~ s/\\/\\\\/g;
+  $s =~ s/"/\\"/g;
+  $s =~ s/\r/\\r/g;
+  $s =~ s/\n/\\n/g;
+  $s =~ s/\t/\\t/g;
+  return $s;
+}
+my $report = '';
+if ($report_path && -f $report_path) {
+  local $/;
+  open my $fh, '<', $report_path or die $!;
+  $report = <$fh>;
+  close $fh;
+}
+my $log = '';
+if ($log_path && -f $log_path) {
+  local $/;
+  open my $fh, '<', $log_path or die $!;
+  $log = <$fh>;
+  close $fh;
+}
+my $max = 409600;
+if (length($log) > $max) {
+  $log = substr($log, length($log) - $max);
+}
+my $result = $ENV{REMAX_REPORT_RESULT} || 'FAIL';
+my %steps = (
+  DRIVER => $ENV{REMAX_STEP_DRIVER} || '',
+  CASSETTE => $ENV{REMAX_STEP_CASSETTE} || '',
+  FINISHER => $ENV{REMAX_STEP_FINISHER} || '',
+  SIDES => $ENV{REMAX_STEP_SIDES} || '',
+  'ENTER NAME' => $ENV{REMAX_STEP_ENTER} || '',
+  QUEUE => $ENV{REMAX_STEP_QUEUE} || '',
+  URI => $ENV{REMAX_STEP_URI} || '',
+  'STALE QUEUE' => $ENV{REMAX_STEP_STALE} || '',
+);
+my $steps_json = '{';
+my $first = 1;
+foreach my $name (sort keys %steps) {
+  $steps_json .= ',' unless $first;
+  $first = 0;
+  $steps_json .= '"' . j($name) . '":"' . j($steps{$name}) . '"';
+}
+$steps_json .= '}';
+open my $fh, '>', $out or die $!;
+print $fh '{'
+  . '"print_username":"' . j($ENV{REMAX_REPORT_PRINT_USER}) . '",'
+  . '"computer_name":"' . j($ENV{REMAX_REPORT_COMPUTER}) . '",'
+  . '"os":"' . j($ENV{REMAX_REPORT_OS}) . '",'
+  . '"overall_result":"' . j($result) . '",'
+  . '"steps":' . $steps_json . ','
+  . '"os_user":"' . j($ENV{REMAX_REPORT_OS_USER}) . '",'
+  . '"ip_address":"' . j($ENV{REMAX_REPORT_IP}) . '",'
+  . '"mac_address":"' . j($ENV{REMAX_REPORT_MAC}) . '",'
+  . '"network":"' . j($ENV{REMAX_REPORT_NETWORK}) . '",'
+  . '"script_version":"' . j($ENV{REMAX_REPORT_VERSION}) . '",'
+  . '"report_text":"' . j($report) . '",'
+  . '"log_text":"' . j($log) . '"'
+  . '}';
+close $fh;
+PERL
+  http_code="$(curl -sS -m 10 -o "$body" -w '%{http_code}' \
+    -X POST "$INGEST_URL" \
+    -H "Authorization: Bearer ${key}" \
+    -H "Content-Type: application/json" \
+    --data-binary @"$payload" 2>>"${LOG:-/dev/null}" || true)"
+  say "Install report HTTP status ${http_code:-none}"
+  if [[ "$http_code" == "201" ]]; then
+    report_line "REPORTED:    PASS"
+  else
+    report_line "REPORTED:    FAIL HTTP ${http_code:-none}"
+  fi
+  return 0
 }
 
 embed_canon_ppd() {
@@ -1501,7 +1632,10 @@ EOF
 finalize_report() {
   local rc="$1"
   refresh_queue_checks || true
+  REPORT_FILE="${WORKDIR:-/tmp}/remax-install-report.txt"
+  : > "$REPORT_FILE"
   print_report
+  report_install || true
   copy_log || true
   REPORT_DONE=1
   exit "$rc"

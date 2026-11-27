@@ -106,7 +106,11 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.10",
+        "1.2.11",
+        "__REMAX_INGEST_KEY__",
+        "REMAX_NO_REPORT",
+        "printer-installs",
+        "EncodedCommand",
         "RemaxWin1210",
         "Find-TitledWindow",
         "ApplyDevMode",
