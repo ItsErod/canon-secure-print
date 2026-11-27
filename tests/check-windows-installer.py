@@ -106,8 +106,10 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.11",
-        "__REMAX_INGEST_KEY__",
+        "1.2.12",
+        "application/vnd.github.sha",
+        "Cache-Control",
+        "REMAX_INGEST_KEY",
         "REMAX_NO_REPORT",
         "printer-installs",
         "EncodedCommand",

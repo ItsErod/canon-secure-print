@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.11
+# Remax Secure Printer - Windows installer 1.2.12
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,7 +69,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.11'
+$script:Version = '1.2.12'
 $script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
 $script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
@@ -672,24 +672,143 @@ function Test-RemaxAdmin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-VersionAtLeast {
+    param([string]$Have, [string]$Want)
+    if ([string]::IsNullOrWhiteSpace($Have)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Want)) { return $true }
+    $a = @($Have.Split('.'))
+    $b = @($Want.Split('.'))
+    $n = $a.Count
+    if ($b.Count -gt $n) { $n = $b.Count }
+    for ($i = 0; $i -lt $n; $i++) {
+        $av = 0
+        $bv = 0
+        if ($i -lt $a.Count) { [void][int]::TryParse([string]$a[$i], [ref]$av) }
+        if ($i -lt $b.Count) { [void][int]::TryParse([string]$b[$i], [ref]$bv) }
+        if ($av -gt $bv) { return $true }
+        if ($av -lt $bv) { return $false }
+    }
+    return $true
+}
+
+function Get-ScriptVersionFromText {
+    param([string]$Text)
+    if ($Text -match '\$script:Version\s*=\s*''([^'']+)''') { return [string]$Matches[1] }
+    return ''
+}
+
+function Get-MainCommitSha {
+    $sha = ''
+    try {
+        $request = [System.Net.HttpWebRequest]::Create('https://api.github.com/repos/ItsErod/canon-secure-print/commits/main')
+        $request.Method = 'GET'
+        $request.Accept = 'application/vnd.github.sha'
+        $request.UserAgent = 'RemaxSecurePrinter'
+        $request.Timeout = 10000
+        $request.Headers.Add('Cache-Control', 'no-cache')
+        $request.Headers.Add('Pragma', 'no-cache')
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        try { $sha = $reader.ReadToEnd().Trim() } finally {
+            $reader.Close()
+            $response.Close()
+        }
+    } catch {
+        return ''
+    }
+    if ($sha -match '^[0-9a-fA-F]{40}$') { return $sha.ToLowerInvariant() }
+    return ''
+}
+
+function Get-ElevatedScriptUrl {
+    param([string]$CommitSha)
+    if ($CommitSha -match '^[0-9a-fA-F]{40}$') {
+        return 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/' + $CommitSha.ToLowerInvariant() + '/install-windows.ps1'
+    }
+    $nonce = [guid]::NewGuid().ToString('n')
+    return $script:RawUrl + '?nocache=' + $nonce
+}
+
+function Get-ElevatedDownloadScript {
+    param([string]$ScriptUrl, [string]$LaunchVersion)
+    $safeUrl = ([string]$ScriptUrl).Replace("'", "''")
+    $safeVer = ([string]$LaunchVersion).Replace("'", "''")
+    $body = @'
+$launchVersion = '__VER__'
+$url = '__URL__'
+$req = [System.Net.HttpWebRequest]::Create($url)
+$req.Method = 'GET'
+$req.UserAgent = 'RemaxSecurePrinter'
+$req.Timeout = 60000
+$req.Headers.Add('Cache-Control', 'no-cache')
+$req.Headers.Add('Pragma', 'no-cache')
+$resp = $req.GetResponse()
+$reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+$text = $reader.ReadToEnd()
+$reader.Close()
+$resp.Close()
+$got = ''
+if ($text -match '\$script:Version\s*=\s*''([^'']+)''') { $got = $Matches[1] }
+$older = $false
+if ($got) {
+    $a = @($got.Split('.'))
+    $b = @($launchVersion.Split('.'))
+    $n = $a.Count
+    if ($b.Count -gt $n) { $n = $b.Count }
+    for ($i = 0; $i -lt $n; $i++) {
+        $av = 0
+        $bv = 0
+        if ($i -lt $a.Count) { [void][int]::TryParse($a[$i], [ref]$av) }
+        if ($i -lt $b.Count) { [void][int]::TryParse($b[$i], [ref]$bv) }
+        if ($av -lt $bv) { $older = $true; break }
+        if ($av -gt $bv) { break }
+    }
+}
+if ($older) {
+    Write-Host ('Warning: downloaded installer ' + $got + ' is older than launcher ' + $launchVersion + '. The elevated window may still be running a stale script.')
+}
+Invoke-Expression $text
+'@
+    return $body.Replace('__VER__', $safeVer).Replace('__URL__', $safeUrl)
+}
+
 function Get-ElevatedInstallCommand {
+    param([string]$ScriptUrl)
+    if ([string]::IsNullOrWhiteSpace($ScriptUrl)) { $ScriptUrl = Get-ElevatedScriptUrl -CommitSha '' }
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'REMAX_*' })) {
+        if ($item.Name -eq 'REMAX_LAUNCH_VERSION') { continue }
         $value = ([string]$item.Value).Replace("'", "''")
         [void]$lines.Add('$' + 'env:' + $item.Name + " = '" + $value + "'")
     }
     if ($script:Mode -eq 'verify' -and -not $env:REMAX_MODE) {
         [void]$lines.Add('$' + "env:REMAX_MODE = 'verify'")
     }
-    [void]$lines.Add("irm '" + $script:RawUrl + "' | iex")
+    $safeVersion = ([string]$script:Version).Replace("'", "''")
+    [void]$lines.Add('$' + "env:REMAX_LAUNCH_VERSION = '" + $safeVersion + "'")
+    [void]$lines.Add((Get-ElevatedDownloadScript -ScriptUrl $ScriptUrl -LaunchVersion $script:Version))
     return ($lines -join "`r`n")
+}
+
+function Write-StaleLaunchWarning {
+    $want = [string]$env:REMAX_LAUNCH_VERSION
+    if ([string]::IsNullOrWhiteSpace($want)) { return }
+    if (Test-VersionAtLeast -Have $script:Version -Want $want) { return }
+    Write-RemaxLine ("Warning: this installer is " + $script:Version + ", older than the launcher " + $want + ". The elevated window may still be running a stale script.")
 }
 
 function Start-RemaxElevatedRelaunch {
     if (-not (Test-WindowsHost)) { return $false }
     if ($script:Mode -eq 'selftest' -or $script:Mode -eq 'help' -or $script:Mode -eq 'usage-error') { return $false }
     if (Test-RemaxAdmin) { return $false }
-    $command = Get-ElevatedInstallCommand
+    $sha = Get-MainCommitSha
+    $url = Get-ElevatedScriptUrl -CommitSha $sha
+    if ($sha) {
+        Write-RemaxLine ("Elevated install will download main at " + $sha)
+    } else {
+        Write-RemaxLine "Could not resolve main. Elevated install will download main with a cache buster."
+    }
+    $command = Get-ElevatedInstallCommand -ScriptUrl $url
     $bytes = [System.Text.Encoding]::Unicode.GetBytes($command)
     $encoded = [Convert]::ToBase64String($bytes)
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -7517,7 +7636,17 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.11') 'version string is 1.2.11'
+    Assert-Remax ($script:Version -eq '1.2.12') 'version string is 1.2.12'
+    Assert-Remax (Test-VersionAtLeast -Have '1.2.12' -Want '1.2.11') '1.2.12 is at least 1.2.11'
+    Assert-Remax (Test-VersionAtLeast -Have '1.2.12' -Want '1.2.12') 'the same version is new enough'
+    Assert-Remax (-not (Test-VersionAtLeast -Have '1.2.10' -Want '1.2.12')) '1.2.10 is older than 1.2.12'
+    Assert-Remax (Test-VersionAtLeast -Have '1.10' -Want '1.9') 'version parts compare as numbers'
+    $versionText = "`$script:Version = '1.2.12'"
+    Assert-Remax ((Get-ScriptVersionFromText $versionText) -eq '1.2.12') 'script version can be read from downloaded text'
+    $shaUrl = Get-ElevatedScriptUrl -CommitSha '0123456789abcdef0123456789abcdef01234567'
+    Assert-Remax ($shaUrl -eq 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/0123456789abcdef0123456789abcdef01234567/install-windows.ps1') 'a resolved main SHA is used in the raw URL'
+    $bustUrl = Get-ElevatedScriptUrl -CommitSha ''
+    Assert-Remax ($bustUrl.StartsWith($script:RawUrl + '?nocache=')) 'a failed SHA lookup uses a cache buster'
     Assert-Remax (-not [string]::IsNullOrWhiteSpace($script:IngestKey)) 'install report key is set'
     Assert-Remax ($script:IngestUrl -eq 'https://tickets.rmxofficetools.com/api/public/printer-installs') 'install report URL is set'
     $savedReport = $env:REMAX_NO_REPORT
@@ -7528,8 +7657,9 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     $env:REMAX_PRINT_USER = "jo'hns"
     $elevated = Get-ElevatedInstallCommand
     Assert-Remax ($elevated.Contains("REMAX_PRINT_USER = 'jo''hns'")) 'elevated relaunch keeps REMAX_PRINT_USER'
-    Assert-Remax ($elevated.Contains($script:RawUrl)) 'elevated relaunch downloads the main script'
-    Assert-Remax ($elevated.Contains('irm ')) 'elevated relaunch uses irm | iex'
+    Assert-Remax ($elevated.Contains('Cache-Control')) 'elevated download sends no-cache headers'
+    Assert-Remax ($elevated.Contains('nocache=')) 'elevated download without a SHA uses a cache buster'
+    Assert-Remax ($elevated.Contains("REMAX_LAUNCH_VERSION = '" + $script:Version + "'")) 'elevated relaunch records the launcher version'
     if ($null -eq $savedUser) { Remove-Item Env:REMAX_PRINT_USER -ErrorAction SilentlyContinue } else { $env:REMAX_PRINT_USER = $savedUser }
     Assert-Remax ((Get-ReportTail -Text ('abcde') -MaxBytes 3) -eq 'cde') 'report log tail keeps the last bytes'
     $mixedName = [byte[]](84, 115, 105, 111, 103, 97, 115, 101, 0, 0)
@@ -7984,6 +8114,7 @@ try {
         break
     }
     Start-RemaxElevatedRelaunch | Out-Null
+    Write-StaleLaunchWarning
     switch ($script:Mode) {
         'help' { Show-Usage; Invoke-Complete 0 }
         'usage-error' {
