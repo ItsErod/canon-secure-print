@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.12
+# Remax Secure Printer - Windows installer 1.2.13
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -58,7 +58,7 @@
 #     Dialog title Default Value Settings
 #     Name to Set for User Information: radio User Name (not Logon Name)
 #     and the text box under that radio
-#     Always Confirm User Information When Performing Secured Print stays on
+#     Always Confirm User Information When Performing Secured Print stays off
 #     Confirm User Name When Printing stays off, PIN stays blank
 #     Get Device Information is not changed
 #   PASS on those lines requires a property readback or a dialog readback
@@ -69,7 +69,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.12'
+$script:Version = '1.2.13'
 $script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
 $script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
@@ -909,13 +909,13 @@ function Send-RemaxInstallReport {
         elseif ($ExitCode -eq 2) { $result = 'PARTIAL' }
         else { $result = 'FAIL' }
     }
-    $steps = New-Object PSObject
+    $steps = @{}
     foreach ($label in @(Get-StatusLabels)) {
         $state = 'not checked'
         if ($script:LastStatus -and $script:LastStatus.ContainsKey($label)) {
             $state = [string]$script:LastStatus[$label].State
         }
-        $steps | Add-Member -NotePropertyName $label -NotePropertyValue $state -Force
+        $steps[$label] = $state
     }
     $adapter = Get-PrimaryAdapter
     $osUser = ''
@@ -924,57 +924,128 @@ function Send-RemaxInstallReport {
     if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
         try { $logText = [System.IO.File]::ReadAllText($script:LogFile) } catch { $logText = '' }
     }
-    $logText = Get-ReportTail -Text $logText -MaxBytes 409600
-    $reportBody = ''
-    if ($null -ne $script:ReportText) { $reportBody = [string]$script:ReportText }
-    Write-Remax ("Install report text length " + $reportBody.Length)
-    $body = @{
-        print_username = [string]$script:LastPrintUser
-        computer_name  = [string]$env:COMPUTERNAME
-        os              = (Get-RemaxOsCaption)
-        overall_result  = $result
-        steps           = $steps
-        os_user         = $osUser
-        ip_address      = [string]$adapter.Ip
-        mac_address     = [string]$adapter.Mac
-        network         = (Get-RemaxReportNetwork)
-        script_version  = [string]$script:Version
-        report_text     = $reportBody
-        log_text        = $logText
-    }
-    $json = $body | ConvertTo-Json -Depth 6 -Compress
-    $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $status = 0
-    $detail = ''
     try {
+    $logText = Get-ReportTail -Text $logText -MaxBytes 409600
+    $reportBody = Get-InstallReportText
+    Write-Remax ("Install report text length " + $reportBody.Length)
+    $posted = Invoke-InstallReportAttempt -Key $key -Result $result -Steps $steps -OsUser $osUser -Adapter $adapter -ReportBody $reportBody -LogText $logText
+    if ($posted.Status -eq 413) {
+        Write-Remax "Install report was too large. Retrying with a shorter log."
+        $shortLog = Get-ReportTail -Text $logText -MaxBytes 32768
+        $posted = Invoke-InstallReportAttempt -Key $key -Result $result -Steps $steps -OsUser $osUser -Adapter $adapter -ReportBody $reportBody -LogText $shortLog
+    }
+    if ($posted.Status -eq 201) {
+        Write-RemaxLine 'REPORTED:     PASS'
+    } else {
+        $suffix = ''
+        if ($posted.Status -gt 0) { $suffix = ' HTTP ' + $posted.Status }
+        Write-RemaxLine ('REPORTED:     FAIL' + $suffix)
+    }
+    } catch {
+        Write-Remax ("Install report failed before completion: " + $_.Exception.Message)
+        Write-RemaxLine 'REPORTED:     FAIL'
+    }
+}
+
+function Get-InstallReportText {
+    if ($null -eq $script:ReportText) { return '' }
+    return [string]$script:ReportText
+}
+
+function ConvertTo-InstallReportJson {
+    param($Body)
+    try {
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $serializer.MaxJsonLength = 16777216
+        $serializer.RecursionLimit = 8
+        return $serializer.Serialize($Body)
+    } catch {
+        Write-Remax ("Install report JSON serializer failed: " + $_.Exception.Message)
+        return ($Body | ConvertTo-Json -Depth 8 -Compress)
+    }
+}
+
+function Read-WebResponseBody {
+    param($Response)
+    if (-not $Response) { return '' }
+    try {
+        $stream = $Response.GetResponseStream()
+        if (-not $stream) { return '' }
+        $reader = New-Object System.IO.StreamReader($stream)
+        $text = $reader.ReadToEnd()
+        $reader.Close()
+        if ($null -eq $text) { return '' }
+        if ($text.Length -gt 800) { return $text.Substring(0, 800) }
+        return $text
+    } catch {
+        return ''
+    }
+}
+
+function Invoke-InstallReportAttempt {
+    param($Key, [string]$Result, $Steps, [string]$OsUser, $Adapter, [string]$ReportBody, [string]$LogText)
+    $attempt = @{ Status = 0; Body = ''; Error = '' }
+    try {
+        try { [System.Net.ServicePointManager]::Expect100Continue = $false } catch { }
+        try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 } catch { }
+        $network = 'OTHER'
+        try { $network = Get-RemaxReportNetwork } catch { $network = 'OTHER' }
+        $stepMap = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        if ($Steps) {
+            foreach ($label in @($Steps.Keys)) {
+                $stepMap[[string]$label] = [string]$Steps[$label]
+            }
+        }
+        $body = New-Object 'System.Collections.Generic.Dictionary[string,object]'
+        $body['print_username'] = [string]$script:LastPrintUser
+        $body['computer_name'] = [string]$env:COMPUTERNAME
+        $body['os'] = [string](Get-RemaxOsCaption)
+        $body['overall_result'] = [string]$Result
+        $body['steps'] = $stepMap
+        $body['os_user'] = [string]$OsUser
+        $body['ip_address'] = [string]$adapter.Ip
+        $body['mac_address'] = [string]$adapter.Mac
+        $body['network'] = [string]$network
+        $body['script_version'] = [string]$script:Version
+        $body['report_text'] = [string]$ReportBody
+        $body['log_text'] = [string]$LogText
+        $json = ConvertTo-InstallReportJson $body
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+        Write-Remax ("Install report POST " + $script:IngestUrl)
+        Write-Remax ("Install report payload bytes " + $payload.Length)
         $request = [System.Net.HttpWebRequest]::Create($script:IngestUrl)
         $request.Method = 'POST'
         $request.ContentType = 'application/json; charset=utf-8'
         $request.Timeout = 10000
         $request.ReadWriteTimeout = 10000
-        $request.Headers.Add('Authorization', 'Bearer ' + $key)
+        $request.Headers.Add('Authorization', 'Bearer ' + $Key)
         $request.ContentLength = $payload.Length
         $stream = $request.GetRequestStream()
         try { $stream.Write($payload, 0, $payload.Length) } finally { $stream.Close() }
-        $response = $request.GetResponse()
-        try { $status = [int]$response.StatusCode } finally { $response.Close() }
-    } catch {
-        $web = $_.Exception
-        if ($web.Response) {
-            try { $status = [int]$web.Response.StatusCode } catch { $status = 0 }
-            try { $web.Response.Close() } catch { }
+        try {
+            $response = $request.GetResponse()
+            try {
+                $attempt.Status = [int]$response.StatusCode
+                $attempt.Body = Read-WebResponseBody $response
+            } finally { $response.Close() }
+        } catch {
+            $attempt.Error = $_.Exception.Message
+            $resp = $null
+            try { $resp = $_.Exception.Response } catch { $resp = $null }
+            if ($resp) {
+                try { $attempt.Status = [int]$resp.StatusCode } catch { }
+                $attempt.Body = Read-WebResponseBody $resp
+                try { $resp.Close() } catch { }
+            }
         }
-        $detail = $_.Exception.Message
+    } catch {
+        $attempt.Error = $_.Exception.Message
     }
-    Write-Remax ("Install report HTTP status " + $status)
-    if ($detail) { Write-Remax ("Install report error: " + $detail) }
-    if ($status -eq 201) {
-        Write-RemaxLine 'REPORTED:     PASS'
-    } else {
-        $suffix = ''
-        if ($status -gt 0) { $suffix = ' HTTP ' + $status }
-        Write-RemaxLine ('REPORTED:     FAIL' + $suffix)
-    }
+    Write-Remax ("Install report HTTP status " + $attempt.Status)
+    if ($attempt.Body) { Write-Remax ("Install report response: " + $attempt.Body) }
+    if ($attempt.Error) { Write-Remax ("Install report error: " + $attempt.Error) }
+    return $attempt
 }
 
 function Show-AdminHelp {
@@ -4223,10 +4294,7 @@ function Set-DefaultValueOnWindow {
     }
     $elements = Get-UiaDescendants $Window
     $targets = Find-CanonDefaultValueTargets $elements
-    if ($targets.AlwaysConfirm -and $targets.AlwaysConfirm.Toggle -ne 'On') {
-        [void](Set-CanonCheck -Snapshot $targets.AlwaysConfirm -On $true)
-        Write-Remax "Checked Always Confirm User Information When Performing Secured Print."
-    }
+    [void](Ensure-AlwaysConfirmOff -Window $Window)
     if ($targets.ConfirmPrinting -and $targets.ConfirmPrinting.Toggle -eq 'On') {
         [void](Set-CanonCheck -Snapshot $targets.ConfirmPrinting -On $false)
         Write-Remax "Cleared Confirm User Name When Printing."
@@ -4236,6 +4304,38 @@ function Set-DefaultValueOnWindow {
         Write-Remax "Cleared the secured print PIN."
     }
     return ($radioOk -and $nameOk)
+}
+
+function Test-AlwaysConfirmWanted {
+    return $false
+}
+
+function Ensure-AlwaysConfirmOff {
+    param($Window)
+    if (-not $Window) { return 'missing' }
+    $elements = @()
+    try { $elements = Get-UiaDescendants $Window } catch { $elements = @() }
+    $targets = Find-CanonDefaultValueTargets $elements
+    if (-not $targets.AlwaysConfirm) {
+        Write-Remax "Always Confirm User Information When Performing Secured Print was not found."
+        return 'missing'
+    }
+    if ($targets.AlwaysConfirm.Toggle -eq 'On') {
+        if (Test-AlwaysConfirmWanted) {
+            Write-Remax "Always Confirm User Information When Performing Secured Print is already on."
+        } else {
+            [void](Set-CanonCheck -Snapshot $targets.AlwaysConfirm -On $false)
+            Start-Sleep -Milliseconds 200
+            try { $elements = Get-UiaDescendants $Window } catch { $elements = @() }
+            $targets = Find-CanonDefaultValueTargets $elements
+        }
+    }
+    $state = 'unchecked'
+    if ($targets.AlwaysConfirm -and $targets.AlwaysConfirm.Toggle) {
+        $state = [string]$targets.AlwaysConfirm.Toggle
+    }
+    Write-Remax ("Always Confirm User Information When Performing Secured Print final state: " + $state)
+    return $state
 }
 
 function Test-UserInformationTitle {
@@ -4613,6 +4713,7 @@ function Write-UserNameRegistryHits {
 
 function Invoke-UserNameDevModePatch {
     param([string]$PrintUser)
+    Write-Remax "DevMode name patch does not enable Always Confirm User Information When Performing Secured Print."
     if (-not ('RemaxWin1210' -as [type])) {
         Write-Remax "SetPrinter skipped. Win32 helper is not loaded."
         return $false
@@ -4923,6 +5024,7 @@ function Update-DefaultValueDialog {
             $result.Read.Name = $direct
             $result.Read.NameSeen = $true
         }
+        if (-not $ReadOnly) { [void](Ensure-AlwaysConfirmOff -Window $dlg) }
         if ($ReadOnly) {
             Close-UserDialog -Window $dlg
         } else {
@@ -6505,7 +6607,7 @@ function Get-UserNameDetail {
     }
     $who = 'the print username'
     if (-not [string]::IsNullOrWhiteSpace($name)) { $who = $name }
-    return ("Printer properties, Device Settings, check Set User Information, click Settings..., dialog Default Value Settings, radio User Name, text " + $who + ". Leave Always Confirm User Information When Performing Secured Print checked, Confirm User Name When Printing unchecked, and PIN blank. Do not change Get Device Information.")
+    return ("Printer properties, Device Settings, check Set User Information, click Settings..., dialog Default Value Settings, radio User Name, text " + $who + ". Leave Always Confirm User Information When Performing Secured Print unchecked, Confirm User Name When Printing unchecked, and PIN blank. Do not change Get Device Information.")
 }
 
 function Get-ReportFooter {
@@ -6532,7 +6634,7 @@ Exit code 2 is not a failed install. When this script is started with irm | iex,
 3. Output Options = Inner Finisher E1.
 4. Check Set User Information. Click the Settings... button on that row.
 5. In Default Value Settings, under Name to Set for User Information, select User Name (not Logon Name) and type $user in the box under that radio.
-6. Leave Always Confirm User Information When Performing Secured Print checked. Leave Confirm User Name When Printing unchecked. Leave PIN blank. Do not change Get Device Information.
+6. Leave Always Confirm User Information When Performing Secured Print unchecked. Leave Confirm User Name When Printing unchecked. Leave PIN blank. Do not change Get Device Information.
 7. Apply, OK. When SIDES is PASS, 1-sided Printing is already the spooler default.
 Leave the Printer properties window alone while the script is driving it.
 "@.Trim()
@@ -7754,7 +7856,15 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.12') 'version string is 1.2.12'
+    Assert-Remax ($script:Version -eq '1.2.13') 'version string is 1.2.13'
+    Assert-Remax (-not (Test-AlwaysConfirmWanted)) 'Always Confirm User Information stays unchecked'
+    $alwaysText = ''
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $alwaysText = [System.IO.File]::ReadAllText($PSCommandPath)
+    }
+    Assert-Remax ($alwaysText -notmatch 'AlwaysConfirm -On \$true') 'the installer does not check Always Confirm'
+    $badAlwaysLog = 'Write-Remax "' + 'Checked Always Confirm'
+    Assert-Remax ($alwaysText -notmatch [regex]::Escape($badAlwaysLog)) 'the installer does not log checking Always Confirm'
     $pidClean = $true
     if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
         $pidText = [System.IO.File]::ReadAllText($PSCommandPath)

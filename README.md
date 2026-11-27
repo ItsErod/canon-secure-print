@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.12**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
+Windows installer **1.2.13**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -292,7 +292,7 @@ When the report says `MANUAL`, the property readback and the dialog readback did
 3. **Output Options** = **Inner Finisher E1**.
 4. Check **Set User Information**. Click the **Settings...** button on that row (not the one beside **Get Device Information**).
 5. The dialog title is **Default Value Settings**. Under **Name to Set for User Information:**, select **User Name** and type the print username in the box under that radio.
-6. Leave **Always Confirm User Information When Performing Secured Print** checked, **Confirm User Name When Printing** unchecked, and PIN blank. Click OK, then Apply, OK.
+6. Leave **Always Confirm User Information When Performing Secured Print** unchecked, **Confirm User Name When Printing** unchecked, and PIN blank. Click OK, then Apply, OK.
 7. Close Printer properties and open them again if they were already open.
 
 A secure-print PIN is not set. Do not treat a Windows print dialog as proof that the username is set. Read the **INSTALL REPORT**.
@@ -383,7 +383,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.12 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.13 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |
