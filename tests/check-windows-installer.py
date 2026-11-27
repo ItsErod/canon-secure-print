@@ -108,6 +108,11 @@ def main() -> int:
     required = [
         "1.2.5",
         "REMAX_PS_OUTPUT",
+        "REMAX_NO_INPUT_LOCK",
+        "Write-Progress",
+        "BlockInput",
+        "INPUT LOCK",
+        "Ctrl+Alt+Delete",
         "ComboFindExact",
         "NotifySelChange",
         "REMAX_SKIP_CLEANUP",

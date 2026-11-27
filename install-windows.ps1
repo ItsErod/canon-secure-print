@@ -199,6 +199,7 @@ Environment (set them in the elevated PowerShell window):
   REMAX_SKIP_FIREWALL    Set to 1 to skip the firewall rule and AV note.
   REMAX_PS_OUTPUT        Optional PS Output from Application value.
                          Unset leaves that combo unchanged.
+  REMAX_NO_INPUT_LOCK    Set to 1 to leave the keyboard and mouse unlocked.
 
 Exit codes: 0 every line PASS, 2 queue installed and MANUAL lines remain, 1 failed.
 Exit code 1 and exit code 2 do not throw when the script is run with irm | iex.
@@ -2642,6 +2643,8 @@ public static class RemaxWin32 {
     [DllImport("user32.dll")]
     public static extern int GetDlgCtrlID(IntPtr hWnd);
     [DllImport("user32.dll")]
+    public static extern bool BlockInput(bool fBlockIt);
+    [DllImport("user32.dll")]
     public static extern IntPtr SetFocus(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
@@ -3467,27 +3470,34 @@ function Set-Win32ComboValue {
         if (Test-CanonLabelEquals $shown $Want) { return $true }
     }
     Write-Remax "Combo list text was not exposed. Sending Home and Down until the value matches."
-    [void][RemaxWin32]::SetFocus($hwnd)
-    Start-Sleep -Milliseconds 150
-    [RemaxWin32]::TapKey(0x24)
-    Start-Sleep -Milliseconds 150
-    $step = 0
-    while ($step -lt 24) {
-        $cur = [RemaxWin32]::ComboGetCurSel($hwnd)
-        $shown = ''
-        if ($cur -ge 0) { $shown = [RemaxWin32]::ComboGetLbText($hwnd, $cur) }
-        if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
-        if (Test-ComboTextMatches $shown $Want) {
-            [RemaxWin32]::NotifySelChange($hwnd)
-            Write-Remax ("Key selection landed on '" + $shown + "'")
-            return $true
+    $paused = Suspend-InputLock
+    $landed = $false
+    try {
+        [void][RemaxWin32]::SetFocus($hwnd)
+        Start-Sleep -Milliseconds 150
+        [RemaxWin32]::TapKey(0x24)
+        Start-Sleep -Milliseconds 150
+        $step = 0
+        while ($step -lt 24) {
+            $cur = [RemaxWin32]::ComboGetCurSel($hwnd)
+            $shown = ''
+            if ($cur -ge 0) { $shown = [RemaxWin32]::ComboGetLbText($hwnd, $cur) }
+            if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
+            if (Test-ComboTextMatches $shown $Want) {
+                [RemaxWin32]::NotifySelChange($hwnd)
+                Write-Remax ("Key selection landed on '" + $shown + "'")
+                $landed = $true
+                break
+            }
+            [RemaxWin32]::TapKey(0x28)
+            Start-Sleep -Milliseconds 120
+            $step = $step + 1
         }
-        [RemaxWin32]::TapKey(0x28)
-        Start-Sleep -Milliseconds 120
-        $step = $step + 1
+        if (-not $landed) { [RemaxWin32]::NotifySelChange($hwnd) }
+    } finally {
+        if ($paused) { Resume-InputLock }
     }
-    [RemaxWin32]::NotifySelChange($hwnd)
-    return $false
+    return $landed
 }
 
 function Set-CanonComboToLabel {
@@ -3806,6 +3816,133 @@ function Restore-CanonDeviceDat {
     return ($proc.ExitCode -eq 0)
 }
 
+function Test-SkipInputLock {
+    return ($env:REMAX_NO_INPUT_LOCK -eq '1')
+}
+
+function Get-RemaxProgressPlan {
+    return @(
+        @{ Stage = 'Cleanup'; Percent = 10 }
+        @{ Stage = 'Firewall'; Percent = 20 }
+        @{ Stage = 'Download driver'; Percent = 30 }
+        @{ Stage = 'Install driver'; Percent = 40 }
+        @{ Stage = 'Port'; Percent = 50 }
+        @{ Stage = 'Printer'; Percent = 60 }
+        @{ Stage = 'Defaults'; Percent = 70 }
+        @{ Stage = 'Device Settings'; Percent = 80 }
+        @{ Stage = 'Verify'; Percent = 90 }
+        @{ Stage = 'Report'; Percent = 100 }
+    )
+}
+
+function Show-RemaxProgress {
+    param([string]$Stage)
+    $percent = 0
+    foreach ($item in @(Get-RemaxProgressPlan)) {
+        if ([string]$item.Stage -eq $Stage) { $percent = [int]$item.Percent }
+    }
+    try {
+        Write-Progress -Activity 'Remax Secure Printer' -Status $Stage -PercentComplete $percent
+    } catch { }
+    Write-Remax ("Stage: " + $Stage)
+}
+
+function Complete-RemaxProgress {
+    try {
+        Write-Progress -Activity 'Remax Secure Printer' -Completed
+    } catch { }
+}
+
+function Start-InputUnlockWatchdog {
+    Stop-InputUnlockWatchdog
+    $runner = [powershell]::Create()
+    $null = $runner.AddScript({
+        Start-Sleep -Seconds 120
+        $definition = @"
+using System;
+using System.Runtime.InteropServices;
+public static class RemaxInputUnlock {
+    [DllImport("user32.dll")]
+    public static extern bool BlockInput(bool fBlockIt);
+}
+"@
+        try { Add-Type -TypeDefinition $definition -Language CSharp } catch { }
+        try { [void][RemaxInputUnlock]::BlockInput($false) } catch { }
+    })
+    $script:InputLockRunspace = $runner
+    $script:InputLockHandle = $runner.BeginInvoke()
+}
+
+function Stop-InputUnlockWatchdog {
+    $runner = $script:InputLockRunspace
+    if (-not $runner) { return }
+    try { $runner.Stop() } catch { }
+    try {
+        if ($script:InputLockHandle) { $runner.EndInvoke($script:InputLockHandle) }
+    } catch { }
+    try { $runner.Dispose() } catch { }
+    $script:InputLockRunspace = $null
+    $script:InputLockHandle = $null
+}
+
+function Exit-InputLock {
+    Stop-InputUnlockWatchdog
+    if (-not $script:InputLocked) { return }
+    $script:InputLocked = $false
+    $script:InputLockSuspended = $false
+    if (-not ('RemaxWin32' -as [type])) { return }
+    try { [void][RemaxWin32]::BlockInput($false) } catch { }
+}
+
+function Enter-InputLock {
+    if ($script:InputLocked) { return }
+    if (Test-SkipInputLock) {
+        $script:InputLock = @{ State = 'PASS'; Detail = 'skipped (REMAX_NO_INPUT_LOCK=1)' }
+        Write-Remax 'REMAX_NO_INPUT_LOCK=1. Keyboard and mouse stay unlocked.'
+        return
+    }
+    Write-RemaxLine 'Keyboard and mouse are locked for up to 2 minutes while printer settings are applied. Press Ctrl+Alt+Delete to unlock if needed.'
+    Start-InputUnlockWatchdog
+    $locked = $false
+    if ('RemaxWin32' -as [type]) {
+        try { $locked = [bool][RemaxWin32]::BlockInput($true) } catch { $locked = $false }
+    }
+    $script:InputLocked = $locked
+    if ($locked) {
+        $script:InputLock = @{ State = 'PASS'; Detail = 'Keyboard and mouse were locked during Device Settings, then unlocked.' }
+        Write-Remax 'BlockInput returned true.'
+    } else {
+        $script:InputLock = @{ State = 'PASS'; Detail = 'BlockInput returned false. Input was not locked. The install continued.' }
+        Write-Remax 'BlockInput returned false. Input was not locked. The install continued.'
+    }
+}
+
+function Suspend-InputLock {
+    if (-not $script:InputLocked) { return $false }
+    if (-not ('RemaxWin32' -as [type])) { return $false }
+    try {
+        [void][RemaxWin32]::BlockInput($false)
+        $script:InputLockSuspended = $true
+        Write-Remax 'Input lock paused so combo keystrokes can be sent.'
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Resume-InputLock {
+    if (-not $script:InputLockSuspended) { return }
+    $script:InputLockSuspended = $false
+    if (-not ('RemaxWin32' -as [type])) { return }
+    try {
+        $locked = [bool][RemaxWin32]::BlockInput($true)
+        $script:InputLocked = $locked
+        if (-not $locked) {
+            Write-Remax 'BlockInput returned false while restoring the input lock.'
+        }
+    } catch { }
+}
+
 function Invoke-CanonDeviceAutomation {
     param([string]$PrintUser, [string]$Action)
     $result = New-DeviceUiResult
@@ -3830,6 +3967,8 @@ function Invoke-CanonDeviceAutomation {
             Write-Remax ("PrintUI restore failed: " + $_.Exception.Message)
         }
     }
+    Show-RemaxProgress 'Device Settings'
+    Enter-InputLock
     $sessions = New-Object System.Collections.Generic.List[object]
     $read = $null
     $openError = ''
@@ -3850,6 +3989,7 @@ function Invoke-CanonDeviceAutomation {
             }
         }
         if (-not $openError) {
+            Show-RemaxProgress 'Verify'
             $verifySession = Open-RemaxProperties
             [void]$sessions.Add($verifySession)
             if (-not $verifySession.Window) {
@@ -3870,6 +4010,7 @@ function Invoke-CanonDeviceAutomation {
         $openError = "Device Settings automation failed: " + $_.Exception.Message
         Write-Remax $openError
     } finally {
+        Exit-InputLock
         foreach ($session in $sessions) {
             if ($session -and $session.Process) { Stop-RemaxUiProcess $session.Process }
         }
@@ -4253,13 +4394,13 @@ function Read-HardwareFromTicket {
 }
 
 function Get-StatusLabels {
-    return @('CLEANUP', 'DRIVER', 'PORT', 'PRINTER', 'SIDES', 'PAPER SOURCE', 'OUTPUT', 'USER INFO', 'USER NAME', 'FIREWALL', 'REACHABLE', 'STALE QUEUE')
+    return @('CLEANUP', 'DRIVER', 'PORT', 'PRINTER', 'SIDES', 'PAPER SOURCE', 'OUTPUT', 'USER INFO', 'USER NAME', 'FIREWALL', 'REACHABLE', 'INPUT LOCK', 'STALE QUEUE')
 }
 
 function Get-ResultLabels {
     $labels = New-Object System.Collections.Generic.List[string]
     foreach ($label in @(Get-StatusLabels)) {
-        if ($label -eq 'REACHABLE') { continue }
+        if ($label -eq 'REACHABLE' -or $label -eq 'INPUT LOCK') { continue }
         [void]$labels.Add($label)
     }
     return @($labels.ToArray())
@@ -4320,6 +4461,7 @@ function Write-StatusReport {
         $Target
     )
     Set-ExtraReportLines $Status
+    Show-RemaxProgress 'Report'
     $order = @(Get-StatusLabels)
     $states = @()
     foreach ($label in @(Get-ResultLabels)) { $states += [string]$Status[$label].State }
@@ -4344,6 +4486,7 @@ function Write-StatusReport {
             'USER NAME' { 'USER NAME:    ' }
             'FIREWALL' { 'FIREWALL:     ' }
             'REACHABLE' { 'REACHABLE:    ' }
+            'INPUT LOCK' { 'INPUT LOCK:   ' }
             'STALE QUEUE' { 'STALE QUEUE:  ' }
         }
         Write-RemaxLine ($prefix + $row.State + "  " + $row.Detail)
@@ -4361,6 +4504,7 @@ function Write-StatusReport {
     Write-RemaxLine "======================================================"
     Write-RemaxLine (Get-ReportFooter -Result $result -PrintUser $PrintUser -Verify $Verify)
     $script:ReportDone = $true
+    Complete-RemaxProgress
     return $code
 }
 
@@ -4551,6 +4695,13 @@ function Set-ExtraReportLines {
     } else {
         $Status['REACHABLE'].State = 'PASS'
         $Status['REACHABLE'].Detail = 'not run (does not change the exit code)'
+    }
+    if ($script:InputLock) {
+        $Status['INPUT LOCK'].State = [string]$script:InputLock.State
+        $Status['INPUT LOCK'].Detail = [string]$script:InputLock.Detail
+    } else {
+        $Status['INPUT LOCK'].State = 'PASS'
+        $Status['INPUT LOCK'].Detail = 'not run (does not change the exit code)'
     }
     if ($script:PortNote -and [string]$script:PortNote.State -ne 'PASS') {
         if ([string]$Status['PORT'].State -ne 'PASS') {
@@ -5153,7 +5304,13 @@ function Invoke-Install {
         Write-RemaxLine ("PrintManagement module is not available: " + $_.Exception.Message)
         return 1
     }
+    Show-RemaxProgress 'Cleanup'
     $script:Cleanup = Invoke-RemaxCleanup -Target $target
+    Show-RemaxProgress 'Firewall'
+    try { Invoke-RemaxFirewall -Target $target } catch {
+        Write-Remax ("Firewall step failed: " + $_.Exception.Message)
+        $script:Firewall = @{ State = 'MANUAL'; Detail = $_.Exception.Message }
+    }
     $status = New-StatusMap
     $staleOk = $true
     if (-not (Test-SkipCleanup)) {
@@ -5175,6 +5332,7 @@ function Invoke-Install {
         }
         try { $selected = Find-SelectedInstalledDriver } catch { $selected = $null }
     }
+    Show-RemaxProgress 'Download driver'
     if (-not $selected) {
         $pkgUrl = Resolve-CanonPackageUrl
         if (-not [string]::IsNullOrWhiteSpace($env:REMAX_CANON_PKG_URL)) {
@@ -5201,9 +5359,11 @@ function Invoke-Install {
         Copy-RemaxLog -Result 'FAIL' -PrintUser $printUser -Target $target
         return $code
     }
+    Show-RemaxProgress 'Install driver'
     $driverName = [string]$selected.Name
     Write-Remax ("Using driver " + $driverName)
     try { Write-AssistServiceNote } catch { }
+    Show-RemaxProgress 'Port'
     $portResult = $null
     try {
         $portResult = Ensure-LprPort $target
@@ -5212,14 +5372,11 @@ function Invoke-Install {
         $portResult = @{ State = 'MANUAL'; Detail = $_.Exception.Message; Snapshot = $null }
     }
     if ($portResult) { $script:PortNote = $portResult }
-    try { Invoke-RemaxFirewall -Target $target } catch {
-        Write-Remax ("Firewall step failed: " + $_.Exception.Message)
-        $script:Firewall = @{ State = 'MANUAL'; Detail = $_.Exception.Message }
-    }
     try { Invoke-RemaxReachability -Target $target } catch {
         Write-Remax ("Reachability test failed: " + $_.Exception.Message)
         $script:Reachable = @{ State = 'FAIL'; Detail = $_.Exception.Message }
     }
+    Show-RemaxProgress 'Printer'
     try {
         Ensure-PrinterQueue -DriverName $driverName -Target $target
     } catch {
@@ -5232,6 +5389,7 @@ function Invoke-Install {
         Copy-RemaxLog -Result 'FAIL' -PrintUser $printUser -Target $target
         return $code
     }
+    Show-RemaxProgress 'Defaults'
     $duplexError = ''
     try {
         $mode = Set-OneSided
@@ -5446,6 +5604,18 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
     Assert-Remax ($script:Version -eq '1.2.5') 'version string is 1.2.5'
+    $plan = @(Get-RemaxProgressPlan)
+    Assert-Remax ($plan.Count -eq 10) 'progress plan has ten stages'
+    Assert-Remax ([string]$plan[0].Stage -eq 'Cleanup' -and [int]$plan[0].Percent -eq 10) 'progress starts at Cleanup 10'
+    Assert-Remax ([string]$plan[1].Stage -eq 'Firewall' -and [int]$plan[1].Percent -eq 20) 'progress Firewall is 20'
+    Assert-Remax ([string]$plan[9].Stage -eq 'Report' -and [int]$plan[9].Percent -eq 100) 'progress ends at Report 100'
+    $savedLock = $env:REMAX_NO_INPUT_LOCK
+    $env:REMAX_NO_INPUT_LOCK = '1'
+    Assert-Remax (Test-SkipInputLock) 'REMAX_NO_INPUT_LOCK=1 skips the input lock'
+    if ($null -eq $savedLock) { Remove-Item Env:REMAX_NO_INPUT_LOCK -ErrorAction SilentlyContinue } else { $env:REMAX_NO_INPUT_LOCK = $savedLock }
+    $resultLabels = @(Get-ResultLabels)
+    Assert-Remax ($resultLabels -notcontains 'REACHABLE') 'REACHABLE does not change the exit code'
+    Assert-Remax ($resultLabels -notcontains 'INPUT LOCK') 'INPUT LOCK does not change the exit code'
     Assert-Remax ((Get-PsOutputChoice) -eq '') 'PS Output from Application stays unchanged when REMAX_PS_OUTPUT is unset'
     $savedPs = $env:REMAX_PS_OUTPUT
     $env:REMAX_PS_OUTPUT = 'Auto'
@@ -5762,6 +5932,11 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
 }
 
 try {
+    trap {
+        Exit-InputLock
+        Complete-RemaxProgress
+        break
+    }
     switch ($script:Mode) {
         'help' { Show-Usage; Invoke-Complete 0 }
         'usage-error' {
@@ -5788,6 +5963,8 @@ try {
     }
     Invoke-Complete 1
 } finally {
+    Exit-InputLock
+    Complete-RemaxProgress
     if (-not $script:RanAsFile) {
         $ErrorActionPreference = $script:PreviousErrorAction
     }
