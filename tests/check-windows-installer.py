@@ -106,7 +106,9 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.6",
+        "1.2.7",
+        "User Information Settings",
+        "tsiogase",
         "remaxsecure-device-settings.dat",
         "a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279",
         "44692",
@@ -210,6 +212,9 @@ def main() -> int:
             fail(f"install-windows.ps1 contains unsupported store write {token}")
     if "Set-ItemProperty" in installer:
         fail("Set-ItemProperty is not used. Port monitor values use New-ItemProperty in Set-PortRegistry.")
+    name_fn = installer.split("function Write-UserNameRegistryHits", 1)[1].split("function ", 1)[0]
+    if "SetValue" not in name_fn:
+        fail("Write-UserNameRegistryHits must write the typed username over tsiogase")
     port_fn = installer.split("function Set-PortRegistry", 1)[1].split("function ", 1)[0]
     if port_fn.count("New-ItemProperty") != 7:
         fail("Set-PortRegistry must be the only writer, with seven New-ItemProperty calls")

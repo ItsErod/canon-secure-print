@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.6
+# Remax Secure Printer - Windows installer 1.2.7
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,13 +69,14 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.6'
+$script:Version = '1.2.7'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
 $script:DeviceDatUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/remaxsecure-device-settings.dat'
 $script:DeviceDatSha256 = 'a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279'
 $script:DeviceDatBytes = 44692
+$script:ExportedPrintUser = 'tsiogase'
 $script:CanonInfLeaf = 'CNS30UA64.INF'
 $script:RawUrl = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1'
 $script:PrinterName = 'RemaxSecure'
@@ -2877,6 +2878,7 @@ function Wait-UiaTopWindow {
     param(
         [int]$ProcessId,
         [string]$TitleLike,
+        [string[]]$TitleAny,
         $Exclude,
         [int]$TimeoutMs,
         [switch]$SkipProperties
@@ -2896,7 +2898,13 @@ function Wait-UiaTopWindow {
             try { $name = [string]$window.Current.Name } catch { $name = '' }
             if ([string]::IsNullOrWhiteSpace($name)) { continue }
             if ($SkipProperties -and $name -like '*Properties*') { continue }
-            if ($TitleLike -and $name -notlike $TitleLike) { continue }
+            if ($TitleAny -and @($TitleAny).Count -gt 0) {
+                $titleOk = $false
+                foreach ($pat in @($TitleAny)) {
+                    if ($name -like [string]$pat) { $titleOk = $true }
+                }
+                if (-not $titleOk) { continue }
+            } elseif ($TitleLike -and $name -notlike $TitleLike) { continue }
             $handle = [IntPtr]::Zero
             try { $handle = [IntPtr]$window.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
             if (Test-HandleExcluded -Handle $handle -Exclude $Exclude) { continue }
@@ -3321,16 +3329,16 @@ function Wait-WindowClosed {
 }
 
 function Open-ChildDialog {
-    param($Button, [int]$ProcessId, $Exclude, [string]$TitleLike)
+    param($Button, [int]$ProcessId, $Exclude, [string]$TitleLike, [string[]]$TitleAny)
     if (-not $Button) { return $null }
     [void](Invoke-CanonButton -Snapshot $Button -How post)
-    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 8000 -SkipProperties -TitleLike $TitleLike
+    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 8000 -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny
     if ($dlg) { return $dlg }
     [void](Invoke-CanonButton -Snapshot $Button -How mouse)
-    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike
+    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny
     if ($dlg) { return $dlg }
     [void](Invoke-CanonButton -Snapshot $Button -How invoke)
-    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike)
+    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs 4000 -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny)
 }
 
 function Set-DefaultValueOnWindow {
@@ -3372,30 +3380,255 @@ function Set-DefaultValueOnWindow {
     return ($radioOk -and $wrote)
 }
 
+function Test-UserInformationTitle {
+    param([string]$Title)
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $false }
+    return [bool]($Title -like '*User Information Settings*')
+}
+
+function Test-UserNameMatch {
+    param([string]$Actual, [string]$Expected)
+    if ([string]::IsNullOrWhiteSpace($Expected)) { return $false }
+    if ($Actual -eq $Expected) { return $true }
+    return (Test-CanonLabelEquals $Actual $Expected)
+}
+
+function Get-UserNameBytePatterns {
+    param([string]$Name)
+    $ascii = [System.Text.Encoding]::ASCII.GetBytes($Name)
+    $utf16 = [System.Text.Encoding]::Unicode.GetBytes($Name)
+    return @(
+        @{ Encoding = 'ASCII'; Bytes = $ascii }
+        @{ Encoding = 'UTF-16'; Bytes = $utf16 }
+    )
+}
+
+function Find-UserNameOffsets {
+    param([byte[]]$Data, [byte[]]$Needle)
+    $hits = New-Object System.Collections.Generic.List[int]
+    if ($null -eq $Data -or $null -eq $Needle) { return @() }
+    if ($Needle.Length -eq 0 -or $Data.Length -lt $Needle.Length) { return @() }
+    $limit = $Data.Length - $Needle.Length
+    for ($i = 0; $i -le $limit; $i++) {
+        $match = $true
+        for ($j = 0; $j -lt $Needle.Length; $j++) {
+            if ($Data[$i + $j] -ne $Needle[$j]) {
+                $match = $false
+                break
+            }
+        }
+        if ($match) {
+            [void]$hits.Add($i)
+            $i = $i + $Needle.Length - 1
+        }
+    }
+    return @($hits.ToArray())
+}
+
+function Replace-UserNameBytes {
+    param([byte[]]$Data, [string]$OldName, [string]$NewName)
+    $copy = New-Object byte[] $Data.Length
+    [System.Array]::Copy($Data, $copy, $Data.Length)
+    $count = 0
+    $skipped = 0
+    foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
+        $newBytes = $null
+        foreach ($item in @(Get-UserNameBytePatterns $NewName)) {
+            if ($item.Encoding -eq $pat.Encoding) { $newBytes = $item.Bytes }
+        }
+        if ($null -eq $newBytes) { continue }
+        $offsets = @(Find-UserNameOffsets -Data $copy -Needle $pat.Bytes)
+        foreach ($offset in @($offsets)) {
+            if ($newBytes.Length -gt $pat.Bytes.Length) {
+                $skipped = $skipped + 1
+                continue
+            }
+            for ($j = 0; $j -lt $pat.Bytes.Length; $j++) { $copy[$offset + $j] = 0 }
+            if ($newBytes.Length -gt 0) {
+                [System.Array]::Copy($newBytes, 0, $copy, [int]$offset, $newBytes.Length)
+            }
+            $count = $count + 1
+        }
+    }
+    return @{ Bytes = $copy; Count = $count; Skipped = $skipped }
+}
+
+function Get-UserNameRegistryRoots {
+    return @(
+        ('HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\' + $script:PrinterName),
+        'HKCU:\Printers\DevModePerUser',
+        'HKCU:\Printers\DevModes2'
+    )
+}
+
+function Write-UserNameRegistryHits {
+    param([string]$OldName, [string]$NewName, [switch]$Write)
+    $hits = 0
+    $replaced = 0
+    if ([string]::IsNullOrWhiteSpace($OldName)) {
+        return @{ Hits = 0; Replaced = 0 }
+    }
+    foreach ($root in @(Get-UserNameRegistryRoots)) {
+        if (-not (Test-Path -LiteralPath $root)) {
+            Write-Remax ("User name registry key is not present: " + $root)
+            continue
+        }
+        $items = New-Object System.Collections.Generic.List[object]
+        try { [void]$items.Add((Get-Item -LiteralPath $root)) } catch { }
+        try {
+            foreach ($child in @(Get-ChildItem -LiteralPath $root -Recurse -ErrorAction SilentlyContinue)) {
+                if ($child) { [void]$items.Add($child) }
+            }
+        } catch { }
+        foreach ($item in @($items.ToArray())) {
+            $names = @()
+            try { $names = @($item.GetValueNames()) } catch { $names = @() }
+            foreach ($valueName in @($names)) {
+                $label = [string]$valueName
+                if ([string]::IsNullOrEmpty($label)) { $label = '(default)' }
+                $raw = $null
+                try { $raw = $item.GetValue($valueName) } catch { $raw = $null }
+                $where = $item.PSPath + ' value ' + $label
+                if ($raw -is [string]) {
+                    if ($raw.Contains($OldName)) {
+                        $hits = $hits + 1
+                        Write-Remax ("Registry string contains '" + $OldName + "': " + $where)
+                        if ($Write -and $NewName) {
+                            $updated = $raw.Replace($OldName, $NewName)
+                            try {
+                                $item.SetValue($valueName, $updated)
+                                $replaced = $replaced + 1
+                                Write-Remax ("Replaced string '" + $OldName + "' with '" + $NewName + "' in " + $where)
+                            } catch {
+                                Write-Remax ("Could not write " + $where + ": " + $_.Exception.Message)
+                            }
+                        }
+                    }
+                    continue
+                }
+                $bytes = $raw -as [byte[]]
+                if ($null -eq $bytes -or $bytes.Length -eq 0) { continue }
+                foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
+                    $found = @(Find-UserNameOffsets -Data $bytes -Needle $pat.Bytes)
+                    if ($found.Count -gt 0) {
+                        $hits = $hits + 1
+                        Write-Remax ("Registry value contains " + $pat.Encoding + " '" + $OldName + "' (" + $found.Count + ") at " + $where)
+                    }
+                }
+                if ($Write -and $NewName) {
+                    $swap = Replace-UserNameBytes -Data $bytes -OldName $OldName -NewName $NewName
+                    if ($swap.Skipped -gt 0) {
+                        Write-Remax ("'" + $NewName + "' is longer than '" + $OldName + "' in " + $where + ". That occurrence was left unchanged.")
+                    }
+                    if ($swap.Count -gt 0) {
+                        try {
+                            $item.SetValue($valueName, [byte[]]$swap.Bytes, [Microsoft.Win32.RegistryValueKind]::Binary)
+                            $replaced = $replaced + $swap.Count
+                            Write-Remax ("Wrote '" + $NewName + "' over '" + $OldName + "' in " + $where)
+                            $bytes = $swap.Bytes
+                        } catch {
+                            Write-Remax ("Could not write " + $where + ": " + $_.Exception.Message)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ($hits -eq 0) {
+        Write-Remax ("No PrinterDriverData or DevMode value contained ASCII or UTF-16 '" + $OldName + "'.")
+    }
+    return @{ Hits = $hits; Replaced = $replaced }
+}
+
+function Read-UserNameEditValue {
+    param($Elements)
+    $edit = Find-CanonEditByLabel -Elements $Elements -Labels @('User Name')
+    if (-not $edit) { return '' }
+    return [string]$edit.Value
+}
+
+function Close-UserDialog {
+    param($Window, [switch]$Save)
+    $handle = [IntPtr]::Zero
+    try { $handle = [IntPtr]$Window.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
+    if ($Save) {
+        [void](Click-DialogButton -Window $Window -Labels @('OK') -CloseHandle $handle)
+    } else {
+        [void](Click-DialogButton -Window $Window -Labels @('Cancel', 'Close') -CloseHandle $handle)
+    }
+    [void](Wait-WindowClosed -Handle $handle -TimeoutMs 5000)
+}
+
 function Update-DefaultValueDialog {
     param($Window, $Button, [string]$PrintUser, [int]$ProcessId, [switch]$ReadOnly)
     $result = @{ Opened = $false; Read = $null }
     $props = [IntPtr]::Zero
     try { $props = [IntPtr]$Window.Current.NativeWindowHandle } catch { $props = [IntPtr]::Zero }
-    $dlg = Open-ChildDialog -Button $Button -ProcessId $ProcessId -Exclude @($props) -TitleLike '*Default Value Settings*'
+    $dlg = Open-ChildDialog -Button $Button -ProcessId $ProcessId -Exclude @($props) -TitleAny @('*User Information Settings*', '*Default Value Settings*')
     if (-not $dlg) {
-        Write-Remax "Default Value Settings dialog did not open from Settings..."
+        Write-Remax "User Information Settings did not open from Settings..."
         return $result
     }
     $title = ''
     try { $title = [string]$dlg.Current.Name } catch { $title = '' }
-    if (-not (Test-DefaultValueTitle $title)) {
-        Write-Remax ("Opened window '" + $title + "' is not Default Value Settings. Closing it.")
-        $handle = [IntPtr]::Zero
-        try { $handle = [IntPtr]$dlg.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
-        [void](Click-DialogButton -Window $dlg -Labels @('Cancel', 'Close') -CloseHandle $handle)
-        return $result
-    }
     $result.Opened = $true
     Show-CanonWindow $dlg
-    $handle = [IntPtr]::Zero
-    try { $handle = [IntPtr]$dlg.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
-    Write-Remax ("Default Value Settings opened (" + $title + ").")
+    Write-Remax ("Settings dialog opened (" + $title + ").")
+    if (Test-UserInformationTitle $title) {
+        $elements = @()
+        try { $elements = Get-UiaDescendants $dlg } catch { $elements = @() }
+        Write-UiaSummary $elements
+        if (-not $ReadOnly) {
+            $edit = Find-CanonEditByLabel -Elements $elements -Labels @('User Name')
+            if ($edit) {
+                $wrote = Set-CanonEdit -Snapshot $edit -Text $PrintUser
+                $elements = @()
+                try { $elements = Get-UiaDescendants $dlg } catch { $elements = @() }
+                $shown = Read-UserNameEditValue $elements
+                Write-Remax ("User Information Settings User Name set=" + $wrote + " verified '" + $shown + "'")
+            } else {
+                Write-Remax "User Information Settings had no User Name text box."
+            }
+            $defaults = Select-LabeledControl -Elements $elements -Labels @('Default Value Settings') -ControlType 'Button'
+            if ($defaults) {
+                $nested = Open-ChildDialog -Button $defaults -ProcessId $ProcessId -Exclude @($props) -TitleLike '*Default Value Settings*'
+                $nestedTitle = ''
+                if ($nested) {
+                    try { $nestedTitle = [string]$nested.Current.Name } catch { $nestedTitle = '' }
+                }
+                if ($nested -and (Test-DefaultValueTitle $nestedTitle)) {
+                    Write-Remax "Default Value Settings opened from User Information Settings."
+                    [void](Set-DefaultValueOnWindow -Window $nested -PrintUser $PrintUser)
+                    Close-UserDialog -Window $nested -Save
+                } else {
+                    Write-Remax "Default Value Settings button did not open that dialog."
+                    if ($nested) { Close-UserDialog -Window $nested }
+                }
+            } else {
+                Write-Remax "User Information Settings had no Default Value Settings button."
+            }
+        }
+        $elements = @()
+        try { $elements = Get-UiaDescendants $dlg } catch { $elements = @() }
+        $direct = Read-UserNameEditValue $elements
+        $result.Read = Read-DefaultValueFromElements -Elements $elements -PrintUser $PrintUser
+        if (-not [string]::IsNullOrWhiteSpace($direct)) {
+            $result.Read.Name = $direct
+            $result.Read.NameSeen = $true
+        }
+        if ($ReadOnly) {
+            Close-UserDialog -Window $dlg
+        } else {
+            Close-UserDialog -Window $dlg -Save
+        }
+        return $result
+    }
+    if (-not (Test-DefaultValueTitle $title)) {
+        Write-Remax ("Opened window '" + $title + "' is not User Information Settings. Closing it.")
+        Close-UserDialog -Window $dlg
+        $result.Opened = $false
+        return $result
+    }
     if (-not $ReadOnly) {
         [void](Set-DefaultValueOnWindow -Window $dlg -PrintUser $PrintUser)
     }
@@ -3404,11 +3637,10 @@ function Update-DefaultValueDialog {
     Write-UiaSummary $elements
     $result.Read = Read-DefaultValueFromElements -Elements $elements -PrintUser $PrintUser
     if ($ReadOnly) {
-        [void](Click-DialogButton -Window $dlg -Labels @('Cancel', 'Close') -CloseHandle $handle)
+        Close-UserDialog -Window $dlg
     } else {
-        [void](Click-DialogButton -Window $dlg -Labels @('OK') -CloseHandle $handle)
+        Close-UserDialog -Window $dlg -Save
     }
-    [void](Wait-WindowClosed -Handle $handle -TimeoutMs 5000)
     return $result
 }
 
@@ -3626,6 +3858,8 @@ function Set-CanonDeviceOnWindow {
         Start-Sleep -Milliseconds 300
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
+    } elseif ($targets.UserInfo) {
+        Write-Remax "Set User Information is already on. The print username is still written."
     }
     if (-not $targets.UserInfo) {
         Write-Remax "Set User Information checkbox was not found."
@@ -3764,28 +3998,24 @@ function Convert-CanonReadToResult {
         $result.UserInfoDetail = 'Device Settings dialog had no Set User Information checkbox.'
     }
     $who = [string]$PrintUser
-    if (-not $who) { $who = [string]$Read.UserNameValue }
     if (-not $who) { $who = 'blank' }
+    $shown = [string]$Read.UserNameValue
+    if (-not $shown) { $shown = 'blank' }
     $userOk = $false
-    if ($Read.UserDialog -and $Read.UserNameRadio -and $Read.NameSeen -and $Read.AlwaysSeen -and $Read.AlwaysConfirm -and $Read.ConfirmSeen -and (-not $Read.ConfirmPrinting) -and $Read.PinBlank) {
-        if ($PrintUser) {
-            if (Test-CanonLabelEquals $Read.UserNameValue $PrintUser) { $userOk = $true }
-        } elseif (-not [string]::IsNullOrWhiteSpace([string]$Read.UserNameValue)) {
-            $userOk = $true
-        }
+    if ($Read.NameSeen -and $PrintUser -and (Test-UserNameMatch $Read.UserNameValue $PrintUser)) {
+        $userOk = $true
     }
     if ($userOk) {
         $result.UserNameState = 'PASS'
-        $result.UserNameDetail = 'Device Settings readback: User Name = ' + $Read.UserNameValue
+        $result.UserNameDetail = 'User Name readback is ' + $Read.UserNameValue
+    } elseif ($Read.NameSeen -and $PrintUser) {
+        $result.UserNameState = 'FAIL'
+        $result.UserNameDetail = 'User Name readback is ' + $shown + '. Expected ' + $who + '.'
     } elseif (-not $Read.UserDialog) {
-        $result.UserNameDetail = 'Default Value Settings did not open from Settings...'
+        $result.UserNameDetail = 'User Information Settings did not open from Settings...'
     } else {
         $result.UserNameState = $wrongState
-        $shown = [string]$Read.UserNameValue
-        if (-not $shown) { $shown = 'blank' }
-        $radio = 'off'
-        if ($Read.UserNameRadio) { $radio = 'on' }
-        $result.UserNameDetail = 'Device Settings readback: User Name radio ' + $radio + ', text ' + $shown + '. Expected User Name = ' + $who + ' (Always Confirm on, Confirm User Name When Printing off, PIN blank).'
+        $result.UserNameDetail = 'User Name readback is ' + $shown + '. Expected ' + $who + '.'
     }
     if ($Read.ProfileValue) {
         $result.ProfileDetail = 'Config. Profile read back as ' + $Read.ProfileValue + '.'
@@ -4171,51 +4401,79 @@ function Invoke-RemaxDeviceSettings {
         $outputUnset = Test-OutputOptionsUnset $read
         $confirmed = Test-DatRestoreConfirmed -RestoreOk ([bool]$restore.Ok) -PaperUnset $paperUnset -OutputUnset $outputUnset -PaperSeen ([bool]$read.PaperSeen) -OutputSeen ([bool]$read.OutputSeen) -Changed $changed
     }
-    $scope = 'all'
+    $ui = $null
     if ($confirmed) {
         Write-Remax "Device Settings restored from the PrintUI file. Skipping Paper Source and Output Options clicks."
-        $scope = 'user'
+        $ui = New-DeviceUiResult
+        $ui.PaperState = 'PASS'
+        $ui.PaperDetail = 'Cassette Feeding Unit (source: dat)'
+        $ui.OutputState = 'PASS'
+        $ui.OutputDetail = 'Inner Finisher E1 (source: dat)'
     } else {
         Write-Remax "PrintUI restore did not confirm Cassette Feeding Unit and Inner Finisher E1. Falling back to UI Automation clicks."
-    }
-    $ui = $null
-    try {
-        $ui = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope $scope
-    } catch {
-        Write-Remax ("Device Settings automation failed: " + $_.Exception.Message)
-        $ui = New-DeviceUiResult
-        $ui.Attempted = $true
-        $ui.PaperDetail = $_.Exception.Message
-        $ui.OutputDetail = $_.Exception.Message
-        $ui.UserInfoDetail = $_.Exception.Message
-        $ui.UserNameDetail = $_.Exception.Message
-    }
-    if ($confirmed -and $ui) {
-        $laterUnset = $false
-        if ($ui.PaperState -and $ui.PaperState -ne 'PASS' -and $ui.PaperDetail -match 'readback:') { $laterUnset = $true }
-        if ($ui.OutputState -and $ui.OutputState -ne 'PASS' -and $ui.OutputDetail -match 'readback:') { $laterUnset = $true }
-        if ($laterUnset) {
-            Write-Remax "A later Device Settings readback no longer shows the restored Paper Source or Output Options. Falling back to UI Automation clicks."
-            $click = $null
-            try {
-                $click = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'hardware'
-            } catch {
-                Write-Remax ("Paper Source and Output Options click fallback failed: " + $_.Exception.Message)
-            }
-            if ($click) {
-                $ui.PaperState = $click.PaperState
-                $ui.PaperDetail = $click.PaperDetail
-                $ui.OutputState = $click.OutputState
-                $ui.OutputDetail = $click.OutputDetail
-            }
-        } else {
-            $ui.PaperState = 'PASS'
-            $ui.PaperDetail = 'Cassette Feeding Unit (source: dat)'
-            $ui.OutputState = 'PASS'
-            $ui.OutputDetail = 'Inner Finisher E1 (source: dat)'
+        try {
+            $ui = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'hardware'
+        } catch {
+            Write-Remax ("Paper Source and Output Options click fallback failed: " + $_.Exception.Message)
+            $ui = New-DeviceUiResult
+            $ui.Attempted = $true
+            $ui.PaperDetail = $_.Exception.Message
+            $ui.OutputDetail = $_.Exception.Message
         }
     }
+    $nameBefore = Get-PrinterDriverDataSnapshot
+    Write-Remax ("Looking for exported print username '" + $script:ExportedPrintUser + "' in PrinterDriverData and per-user DevMode.")
+    try {
+        [void](Write-UserNameRegistryHits -OldName $script:ExportedPrintUser -NewName $PrintUser -Write)
+    } catch {
+        Write-Remax ("Registry user name replace failed: " + $_.Exception.Message)
+    }
+    $named = Invoke-PrintUserName -PrintUser $PrintUser
+    $nameAfter = Get-PrinterDriverDataSnapshot
+    [void](Write-PrinterDriverDataDiff -Before $nameBefore -After $nameAfter)
+    try { [void](Write-UserNameRegistryHits -OldName $script:ExportedPrintUser -NewName '') } catch { }
+    if (-not $ui) { $ui = New-DeviceUiResult }
+    if ($named) {
+        $ui.Attempted = $true
+        $ui.UserInfoState = [string]$named.UserInfoState
+        $ui.UserInfoDetail = [string]$named.UserInfoDetail
+        $ui.UserNameState = [string]$named.UserNameState
+        $ui.UserNameDetail = [string]$named.UserNameDetail
+        if ($named.ProfileDetail) { $ui.ProfileDetail = [string]$named.ProfileDetail }
+    }
     return $ui
+}
+
+function Invoke-PrintUserName {
+    param([string]$PrintUser)
+    $last = $null
+    $attempt = 1
+    while ($attempt -le 2) {
+        Write-Remax ("Setting print username '" + $PrintUser + "' after the Device Settings restore (attempt " + $attempt + ").")
+        try {
+            $last = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'user'
+        } catch {
+            Write-Remax ("Print username automation failed: " + $_.Exception.Message)
+            $last = New-DeviceUiResult
+            $last.Attempted = $true
+            $last.UserNameState = 'FAIL'
+            $last.UserNameDetail = "User Name was not set: " + $_.Exception.Message
+        }
+        if ($last -and [string]$last.UserNameState -eq 'PASS') { return $last }
+        $shown = ''
+        if ($last) { $shown = [string]$last.UserNameDetail }
+        Write-Remax ("User Name attempt " + $attempt + " did not read back '" + $PrintUser + "'. " + $shown)
+        $attempt = $attempt + 1
+    }
+    if (-not $last) { $last = New-DeviceUiResult }
+    $last.Attempted = $true
+    if ([string]$last.UserNameState -ne 'FAIL') {
+        $last.UserNameState = 'FAIL'
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$last.UserNameDetail)) {
+        $last.UserNameDetail = "User Name readback is not " + $PrintUser + "."
+    }
+    return $last
 }
 
 function Test-SkipInputLock {
@@ -5979,7 +6237,30 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.6') 'version string is 1.2.6'
+    Assert-Remax ($script:Version -eq '1.2.7') 'version string is 1.2.7'
+    Assert-Remax ($script:ExportedPrintUser -eq 'tsiogase') 'exported print username to replace is tsiogase'
+    Assert-Remax (Test-UserInformationTitle 'User Information Settings') 'User Information Settings title is accepted'
+    Assert-Remax (-not (Test-UserInformationTitle 'RemaxSecure Properties')) 'printer properties is not the user dialog'
+    Assert-Remax (Test-UserNameMatch 'johns' 'johns') 'typed username matches readback'
+    Assert-Remax (-not (Test-UserNameMatch 'tsiogase' 'johns')) 'exported username does not match the typed name'
+    $roots = @(Get-UserNameRegistryRoots)
+    Assert-Remax ($roots -contains 'HKCU:\Printers\DevModePerUser') 'per-user DevMode is included'
+    Assert-Remax ($roots -contains 'HKCU:\Printers\DevModes2') 'per-user DevModes2 is included'
+    Assert-Remax ($roots[0] -like '*\Printers\RemaxSecure') 'global printer key is included'
+    $asciiOld = [System.Text.Encoding]::ASCII.GetBytes('xxxtsiogaseyyy')
+    $asciiSwap = Replace-UserNameBytes -Data $asciiOld -OldName 'tsiogase' -NewName 'johns'
+    Assert-Remax ($asciiSwap.Count -eq 1 -and $asciiSwap.Bytes.Length -eq $asciiOld.Length) 'ASCII username replace keeps the field width'
+    Assert-Remax ([System.Text.Encoding]::ASCII.GetString($asciiSwap.Bytes).StartsWith('xxxjohns')) 'ASCII tsiogase becomes johns'
+    Assert-Remax ($asciiSwap.Bytes[8] -eq 0 -and $asciiSwap.Bytes[10] -eq 0 -and $asciiSwap.Bytes[11] -eq 121) 'shorter ASCII name is padded with zeros'
+    $utfOld = [System.Text.Encoding]::Unicode.GetBytes('tsiogase')
+    $utfPad = New-Object byte[] ($utfOld.Length + 2)
+    [System.Array]::Copy($utfOld, $utfPad, $utfOld.Length)
+    $utfSwap = Replace-UserNameBytes -Data $utfPad -OldName 'tsiogase' -NewName 'johns'
+    Assert-Remax ($utfSwap.Count -eq 1) 'UTF-16 username is replaced'
+    $utfShown = [System.Text.Encoding]::Unicode.GetString($utfSwap.Bytes, 0, 10)
+    Assert-Remax ($utfShown -eq 'johns') 'UTF-16 tsiogase becomes johns'
+    $tooLong = Replace-UserNameBytes -Data ([System.Text.Encoding]::ASCII.GetBytes('tsiogase')) -OldName 'tsiogase' -NewName 'longername'
+    Assert-Remax ($tooLong.Count -eq 0 -and $tooLong.Skipped -eq 1) 'a longer username does not overwrite the next bytes'
     Assert-Remax ($script:DeviceDatBytes -eq 44692) 'device settings file is 44692 bytes'
     Assert-Remax ($script:DeviceDatSha256 -eq 'a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279') 'device settings SHA256 is pinned'
     Assert-Remax ($script:DeviceDatUrl -eq 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/remaxsecure-device-settings.dat') 'device settings URL is the release asset'
