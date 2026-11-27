@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.3**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.4**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -249,12 +249,19 @@ Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/m
 powershell -NoProfile -ExecutionPolicy Bypass -File $s -Verify
 ```
 
-The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host address), protocol LPR, TCP port 515, queue name `RemaxSecure`, LPR byte counting on, SNMP off. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. The recorded check is `Add-PrinterPort -Name 172.16.105.21 -LprHostAddress 172.16.105.21 -LprQueueName RemaxSecure -LprByteCounting`, then SNMP disabled. Readback uses `Get-PrinterPort` and the port monitor key `HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\172.16.105.21` (`Protocol=2`, `Queue=RemaxSecure`, `Byte Count=1`, `SNMP Enabled=0`). Installer 1.1.0 used a port named `RemaxSecure_LPR`. Re-running this installer moves `RemaxSecure` onto the host-named port and removes `RemaxSecure_LPR` when no other queue uses it. LPR byte counting stays on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place, leaves it not shared and not the default, and removes a leftover queue named `RemaxSecure_COLOUR`.
+Every install starts with a clean slate unless `REMAX_SKIP_CLEANUP=1`. It removes queues named `RemaxSecure`, `RemaxSecure_COLOUR`, and `RemaxSecure_LPR`, plus any other queue on port `172.16.105.21` or `RemaxSecure_LPR`, then those ports, then the driver `Canon iR-ADV C5235/5240 PS3` when no remaining queue uses it. A locked port is retried after a Print Spooler restart, and the Standard TCP/IP port registry key is removed only if `Remove-PrinterPort` still fails. Cleanup never stops the run. The report line is `CLEANUP` `PASS` or `PARTIAL`.
+
+The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host address), protocol LPR, TCP port 515, queue name `RemaxSecure`, LPR byte counting on, SNMP off. `Add-PrinterPort` creates it with `-LprHostAddress`, `-LprQueueName`, and `-LprByteCounting`. `HostAddress` is not written afterwards, because that CIM property is read-only. SNMP, queue, protocol, and byte counting are written as writable CIM properties and as registry values `Protocol`, `Queue`, `Byte Count`, `SNMP Enabled`, `HostName`, `IPAddress`, and `PortNumber`. If the existing port still does not match, and no queue is using it, the script removes it and creates it again. A port tweak that still does not match is `PORT` `MANUAL` and the queue install continues. The `DRIVER` line is the installed Canon driver even when the queue was not created. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. The recorded check is `Add-PrinterPort -Name 172.16.105.21 -LprHostAddress 172.16.105.21 -LprQueueName RemaxSecure -LprByteCounting`, then SNMP disabled. Readback uses `Get-PrinterPort` and the port monitor key `HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\172.16.105.21` (`Protocol=2`, `Queue=RemaxSecure`, `Byte Count=1`, `SNMP Enabled=0`). Installer 1.1.0 used a port named `RemaxSecure_LPR`. Re-running this installer moves `RemaxSecure` onto the host-named port and removes `RemaxSecure_LPR` when no other queue uses it. LPR byte counting stays on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place, leaves it not shared and not the default, and removes a leftover queue named `RemaxSecure_COLOUR`.
+
+After the port exists, the script reads Security Center antivirus and firewall products (`displayName` and `productState`) and whether each Windows Defender Firewall profile is enabled. Unless `REMAX_SKIP_FIREWALL=1`, it removes and re-adds one outbound Windows Firewall rule named `RemaxSecure Print (spoolsv)`: program `%SystemRoot%\System32\spoolsv.exe`, TCP, remote address `172.16.105.21`, remote port `515`, local ports `721-731`, all profiles. It does not enable File and Printer Sharing and it does not allow every address. If Security Center or the services `VSSERV`, `bdservicehost`, or `EPSecurityService` show Bitdefender, the script does not change Bitdefender. `FIREWALL` is `MANUAL` and the log prints the steps: Protection, Firewall, Rules, allow `C:\Windows\System32\spoolsv.exe` to that printer, and set the office adapter to Home/Office (Trusted), not Public. `EPSecurityService` or the name Endpoint Security is called out as GravityZone, where the rule belongs in the GravityZone firewall policy. Any other third-party product is also `MANUAL`, naming that product. `FIREWALL` is `PASS` only when no third-party product is present and the Windows rule was added. `Test-NetConnection 172.16.105.21 -Port 515` is reported as `REACHABLE` `PASS` or `FAIL` and does not change the exit code. If that test fails while Bitdefender is present, the line says Bitdefender is the likely cause.
 
 | Check | What the script can do |
 | --- | --- |
 | Driver | Name must be exactly `Canon iR-ADV C5235/5240 PS3`, the x64 build of Canon PS3 Printer Driver Ver. 30.00 (Setup.exe file version 30.0.0.1). `PASS` when that name is installed and any file version the spooler exposes is 30.0.0.1 or 30.00. A different Canon PS name can still create the queue, and the line stays `MANUAL`. UFR II and PCL are not used. Canon Driver Information Assist Service is not required. |
-| Port | Standard TCP/IP port named `172.16.105.21`, LPR, queue `RemaxSecure`, byte counting on, SNMP off. |
+| Cleanup | Removes the old RemaxSecure queue, port, and Canon PS3 driver before install, unless `REMAX_SKIP_CLEANUP=1`. `PARTIAL` if a removal step fails. |
+| Port | Standard TCP/IP port named `172.16.105.21`, LPR, queue `RemaxSecure`, byte counting on, SNMP off. A mismatch after the writable update is `MANUAL`. |
+| Firewall | Windows Firewall rule for `spoolsv.exe` to `172.16.105.21:515`. Third-party products, including Bitdefender, stay `MANUAL`. |
+| Reachable | `Test-NetConnection` to port 515. Informational. Does not change the exit code. |
 | Printer | `RemaxSecure`, not shared, not the default. |
 | 1-sided | `Set-PrintConfiguration -DuplexingMode OneSided` (1-sided Printing), including again after Device Settings. |
 | Cassette Feeding Unit | **Paper Source Options** = **Cassette Feeding Unit** (the recorded combo, which used to be None). |
@@ -364,7 +371,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.3 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.4 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

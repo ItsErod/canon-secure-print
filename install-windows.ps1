@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.3
+# Remax Secure Printer - Windows installer 1.2.4
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -66,7 +66,7 @@
 #   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
 #   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.2.3'
+$script:Version = '1.2.4'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -195,6 +195,8 @@ Environment (set them in the elevated PowerShell window):
   REMAX_DEVICE_UI        Set to 0 to skip Printer properties automation.
   REMAX_DEVICE_DAT       Optional PrintUI file. Restored with /Sr d g r
                          before Device Settings automation.
+  REMAX_SKIP_CLEANUP     Set to 1 to keep an existing queue, port, and driver.
+  REMAX_SKIP_FIREWALL    Set to 1 to skip the firewall rule and AV note.
 
 Exit codes: 0 every line PASS, 2 queue installed and MANUAL lines remain, 1 failed.
 Exit code 1 and exit code 2 do not throw when the script is run with irm | iex.
@@ -533,7 +535,7 @@ function Get-ResultLabel {
     $sawManual = $false
     foreach ($state in @($States)) {
         if ($state -eq 'FAIL') { return 'FAIL' }
-        if ($state -eq 'MANUAL') { $sawManual = $true }
+        if ($state -eq 'MANUAL' -or $state -eq 'PARTIAL') { $sawManual = $true }
     }
     if ($sawManual) { return 'PARTIAL' }
     return 'PASS'
@@ -1660,7 +1662,14 @@ function Set-PortRegistry {
     New-ItemProperty -LiteralPath $path -Name 'Queue' -PropertyType String -Value $Target.Queue -Force | Out-Null
     New-ItemProperty -LiteralPath $path -Name 'Byte Count' -PropertyType DWord -Value $byte -Force | Out-Null
     New-ItemProperty -LiteralPath $path -Name 'SNMP Enabled' -PropertyType DWord -Value 0 -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'HostName' -PropertyType String -Value $Target.Host -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'IPAddress' -PropertyType String -Value $Target.Host -Force | Out-Null
+    New-ItemProperty -LiteralPath $path -Name 'PortNumber' -PropertyType DWord -Value 515 -Force | Out-Null
     return $true
+}
+
+function Get-WritablePortPropertyNames {
+    return @('Queue', 'Protocol', 'ByteCount', 'SNMPEnabled')
 }
 
 function Get-PortSnapshot {
@@ -1760,19 +1769,27 @@ function Set-PortFields {
     param($Snapshot, $Target)
     $port = $Snapshot.Cim
     if ($port) {
-        $port.HostAddress = $Target.Host
-        $port.Queue = $Target.Queue
-        $port.Protocol = [uint32]2
-        $port.PortNumber = [uint32]515
-        $port.ByteCount = [bool]$Target.ByteCount
-        if ($port.PSObject.Properties.Name -contains 'SNMPEnabled') {
-            $port.SNMPEnabled = $false
+        $present = @($port.PSObject.Properties.Name)
+        foreach ($prop in @(Get-WritablePortPropertyNames)) {
+            if ($present -notcontains $prop) { continue }
+            if ($prop -eq 'Queue') { $port.Queue = $Target.Queue }
+            elseif ($prop -eq 'Protocol') { $port.Protocol = [uint32]2 }
+            elseif ($prop -eq 'ByteCount') { $port.ByteCount = [bool]$Target.ByteCount }
+            elseif ($prop -eq 'SNMPEnabled') { $port.SNMPEnabled = $false }
         }
-        Set-CimInstance -InputObject $port | Out-Null
+        try {
+            Set-CimInstance -InputObject $port | Out-Null
+        } catch {
+            Write-Remax ("CIM port update failed. HostAddress is left unchanged: " + $_.Exception.Message)
+        }
     }
     $name = $script:PortName
     if ($Snapshot.Name) { $name = [string]$Snapshot.Name }
-    [void](Set-PortRegistry -Name $name -Target $Target)
+    try {
+        [void](Set-PortRegistry -Name $name -Target $Target)
+    } catch {
+        Write-Remax ("Port registry update failed: " + $_.Exception.Message)
+    }
 }
 
 function Add-LprPort {
@@ -1780,9 +1797,9 @@ function Add-LprPort {
     $created = $false
     try {
         if ($Target.ByteCount) {
-            Add-PrinterPort -Name $script:PortName -LprHostAddress $Target.Host -LprQueueName $Target.Queue -LprByteCounting
+            Add-PrinterPort -Name $script:PortName -LprHostAddress $Target.Host -LprQueueName $Target.Queue -LprByteCounting | Out-Null
         } else {
-            Add-PrinterPort -Name $script:PortName -LprHostAddress $Target.Host -LprQueueName $Target.Queue
+            Add-PrinterPort -Name $script:PortName -LprHostAddress $Target.Host -LprQueueName $Target.Queue | Out-Null
         }
         $created = $true
         Write-Remax ("Created Standard TCP/IP LPR port " + $script:PortName)
@@ -1796,7 +1813,10 @@ function Add-LprPort {
         $found = @(Get-ChildItem -LiteralPath $root -Filter prnport.vbs -Recurse -File -ErrorAction SilentlyContinue)
         if ($found.Count -gt 0) { $vbs = $found[0].FullName }
     }
-    if (-not $vbs) { throw "Could not create LPR port $script:PortName and prnport.vbs was not found." }
+    if (-not $vbs) {
+        Write-Remax ("Could not create LPR port " + $script:PortName + " and prnport.vbs was not found.")
+        return
+    }
     Write-Remax ("Creating the port with " + $vbs)
     $prnArgs = @(
         '//nologo', $vbs, '-a', '-r', $script:PortName,
@@ -1804,37 +1824,130 @@ function Add-LprPort {
     )
     $ported = Invoke-LoggedProcess -FilePath 'cscript.exe' -ArgumentList $prnArgs
     if ([int]$ported.Code -ne 0) {
-        throw ("prnport.vbs failed with exit " + $ported.Code)
+        Write-Remax ("prnport.vbs failed with exit " + $ported.Code)
     }
+}
+
+function Restart-PrintSpooler {
+    Write-Remax "Restarting the Print Spooler service."
+    try {
+        Restart-Service -Name Spooler -Force -ErrorAction Stop
+    } catch {
+        Write-Remax ("Restart-Service Spooler failed: " + $_.Exception.Message)
+        return $false
+    }
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        try {
+            $svc = Get-Service -Name Spooler -ErrorAction Stop
+            if ($svc.Status -eq 'Running') {
+                Write-Remax "Print Spooler is running."
+                return $true
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 400
+    } while ((Get-Date) -lt $deadline)
+    Write-Remax "Print Spooler did not return to Running."
+    return $false
+}
+
+function Test-PortInUse {
+    param([string]$Name)
+    try {
+        foreach ($printer in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            if ([string]$printer.PortName -eq $Name) { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+function Remove-PortRegistryKey {
+    param([string]$Name)
+    $path = Get-PortMonitorKey $Name
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+    Write-Remax ("Removed port registry key " + $path)
+    return $true
+}
+
+function Update-ExistingLprPort {
+    param($Snapshot, $Target)
+    Write-Remax "Updating writable LPR settings (queue, protocol, byte counting, SNMP) and the port registry. HostAddress is not written on the CIM object."
+    try { Set-PortFields -Snapshot $Snapshot -Target $Target } catch {
+        Write-Remax ("Port update failed: " + $_.Exception.Message)
+    }
+    $fresh = $null
+    try { $fresh = Get-PortSnapshot $script:PortName } catch { $fresh = $null }
+    if ($fresh -and (Test-PortMatches $fresh $Target)) { return $fresh }
+    Write-Remax "Port readback still does not match. Restarting the Print Spooler so registry LPR settings load."
+    [void](Restart-PrintSpooler)
+    try { $fresh = Get-PortSnapshot $script:PortName } catch { $fresh = $null }
+    return $fresh
 }
 
 function Ensure-LprPort {
     param($Target)
-    Import-PrintModule
+    $manual = @{ State = 'MANUAL'; Detail = ''; Snapshot = $null }
+    try { Import-PrintModule } catch {
+        $manual.Detail = "PrintManagement module is not available: " + $_.Exception.Message
+        return $manual
+    }
     $snapshot = $null
     try {
         $snapshot = Get-PortSnapshot $script:PortName
     } catch {
-        throw ("Could not read Win32_TCPIPPrinterPort: " + $_.Exception.Message)
+        $manual.Detail = "Could not read the port: " + $_.Exception.Message
+        return $manual
     }
     if (-not $snapshot) {
         Add-LprPort $Target
-        $snapshot = Get-PortSnapshot $script:PortName
+        try { $snapshot = Get-PortSnapshot $script:PortName } catch { $snapshot = $null }
     }
     if (-not $snapshot) {
-        throw "Port $script:PortName was not created as a Standard TCP/IP port."
+        $manual.Detail = "Port " + $script:PortName + " was not created. The queue install will still be attempted."
+        return $manual
     }
     if (-not (Test-PortMatches $snapshot $Target)) {
-        Write-Remax "Updating LPR host, queue, protocol 2, port 515, byte counting, and SNMP off on the existing port."
-        Set-PortFields $snapshot $Target
-        $snapshot = Get-PortSnapshot $script:PortName
+        $snapshot = Update-ExistingLprPort -Snapshot $snapshot -Target $Target
     }
-    if (-not (Test-PortMatches $snapshot $Target)) {
-        $snmp = ''
-        if ($snapshot) { $snmp = [string]$snapshot.SnmpEnabled }
-        throw ("Port " + $script:PortName + " is still not LPR to " + $Target.Uri + " with SNMP off. Host=" + $snapshot.Host + " Queue=" + $snapshot.Queue + " Protocol=" + $snapshot.Protocol + " PortNumber=" + $snapshot.PortNumber + " SNMP=" + $snmp)
+    if ($snapshot -and -not (Test-PortMatches $snapshot $Target) -and -not (Test-PortInUse $script:PortName)) {
+        Write-Remax ("No queue is using " + $script:PortName + ". Removing it and creating the LPR port again.")
+        try {
+            Remove-PrinterPort -Name $script:PortName -ErrorAction Stop
+        } catch {
+            Write-Remax ("Remove-PrinterPort failed: " + $_.Exception.Message)
+            [void](Restart-PrintSpooler)
+            try { Remove-PrinterPort -Name $script:PortName -ErrorAction Stop } catch {
+                Write-Remax ("Remove-PrinterPort after the spooler restart failed: " + $_.Exception.Message)
+                try { [void](Remove-PortRegistryKey $script:PortName) } catch {
+                    Write-Remax ("Port registry cleanup failed: " + $_.Exception.Message)
+                }
+                [void](Restart-PrintSpooler)
+            }
+        }
+        Add-LprPort $Target
+        try { $snapshot = Get-PortSnapshot $script:PortName } catch { $snapshot = $null }
+        if ($snapshot -and -not (Test-PortMatches $snapshot $Target)) {
+            $snapshot = Update-ExistingLprPort -Snapshot $snapshot -Target $Target
+        }
     }
-    return $snapshot
+    if ($snapshot -and (Test-PortMatches $snapshot $Target)) {
+        return @{ State = 'PASS'; Detail = (Format-PortDetail -Snapshot $snapshot -Target $Target); Snapshot = $snapshot }
+    }
+    $snmp = ''
+    $hostShown = ''
+    $queueShown = ''
+    $protocolShown = ''
+    if ($snapshot) {
+        $snmp = [string]$snapshot.SnmpEnabled
+        $hostShown = [string]$snapshot.Host
+        $queueShown = [string]$snapshot.Queue
+        $protocolShown = [string]$snapshot.Protocol
+    }
+    $manual.Snapshot = $snapshot
+    $manual.Detail = "Port " + $script:PortName + " is not confirmed as LPR to " + $Target.Uri + " with SNMP off. Host=" + $hostShown + " Queue=" + $queueShown + " Protocol=" + $protocolShown + " SNMP=" + $snmp + ". The queue install continues."
+    Write-Remax $manual.Detail
+    return $manual
 }
 
 function Remove-LegacyPortIfUnused {
@@ -3911,7 +4024,16 @@ function Read-HardwareFromTicket {
 }
 
 function Get-StatusLabels {
-    return @('DRIVER', 'PORT', 'PRINTER', 'SIDES', 'PAPER SOURCE', 'OUTPUT', 'USER INFO', 'USER NAME', 'STALE QUEUE')
+    return @('CLEANUP', 'DRIVER', 'PORT', 'PRINTER', 'SIDES', 'PAPER SOURCE', 'OUTPUT', 'USER INFO', 'USER NAME', 'FIREWALL', 'REACHABLE', 'STALE QUEUE')
+}
+
+function Get-ResultLabels {
+    $labels = New-Object System.Collections.Generic.List[string]
+    foreach ($label in @(Get-StatusLabels)) {
+        if ($label -eq 'REACHABLE') { continue }
+        [void]$labels.Add($label)
+    }
+    return @($labels.ToArray())
 }
 
 function Get-UserNameDetail {
@@ -3945,7 +4067,7 @@ function Get-ReportFooter {
         if ([string]::IsNullOrWhiteSpace($user)) { $user = 'the print username' }
         return @"
 RESULT PARTIAL means the RemaxSecure queue is installed and any PASS lines were read back.
-MANUAL means that item was not confirmed. Re-running the installer tries again.
+MANUAL means that item was not confirmed. CLEANUP PARTIAL means a removal step failed and the install continued. FIREWALL MANUAL means a third-party product, often Bitdefender, must allow spoolsv.exe to the printer. REACHABLE does not change the exit code. Re-running the installer tries again.
 Exit code 2 is not a failed install. When this script is started with irm | iex, exit code 1 and exit code 2 do not throw. LASTEXITCODE is set and this window stays open.
 1. Printer properties for $script:PrinterName, Device Settings.
 2. Paper Source Options = Cassette Feeding Unit.
@@ -3968,9 +4090,10 @@ function Write-StatusReport {
         [string]$PrintUser,
         $Target
     )
+    Set-ExtraReportLines $Status
     $order = @(Get-StatusLabels)
     $states = @()
-    foreach ($label in $order) { $states += [string]$Status[$label].State }
+    foreach ($label in @(Get-ResultLabels)) { $states += [string]$Status[$label].State }
     $result = Get-ResultLabel $states
     $code = Get-ExitCodeForResult $result
     $title = 'INSTALL REPORT'
@@ -3981,6 +4104,7 @@ function Write-StatusReport {
     foreach ($label in $order) {
         $row = $Status[$label]
         $prefix = switch ($label) {
+            'CLEANUP' { 'CLEANUP:      ' }
             'DRIVER' { 'DRIVER:       ' }
             'PORT' { 'PORT:         ' }
             'PRINTER' { 'PRINTER:      ' }
@@ -3989,6 +4113,8 @@ function Write-StatusReport {
             'OUTPUT' { 'OUTPUT:       ' }
             'USER INFO' { 'USER INFO:    ' }
             'USER NAME' { 'USER NAME:    ' }
+            'FIREWALL' { 'FIREWALL:     ' }
+            'REACHABLE' { 'REACHABLE:    ' }
             'STALE QUEUE' { 'STALE QUEUE:  ' }
         }
         Write-RemaxLine ($prefix + $row.State + "  " + $row.Detail)
@@ -4048,8 +4174,20 @@ function Get-QueueStatus {
     $printer = Get-PrinterOrNull $script:PrinterName
     if (-not $printer) {
         $status['PRINTER'].Detail = ($script:PrinterName + " is not installed")
-        $status['PORT'].Detail = ("expected Standard TCP/IP port " + $script:PortName + " for " + $Target.Uri)
-        $status['DRIVER'].Detail = "queue not installed"
+        $driverReport = Get-StandaloneDriverStatus
+        $status['DRIVER'].State = [string]$driverReport.State
+        $status['DRIVER'].Detail = [string]$driverReport.Detail
+        $portSnap = $null
+        try { $portSnap = Get-PortSnapshot $script:PortName } catch { $portSnap = $null }
+        if ($portSnap -and (Test-PortMatches $portSnap $Target)) {
+            $status['PORT'].State = 'PASS'
+            $status['PORT'].Detail = Format-PortDetail -Snapshot $portSnap -Target $Target
+        } elseif ($portSnap) {
+            $status['PORT'].State = 'MANUAL'
+            $status['PORT'].Detail = "Port " + $script:PortName + " exists but is not confirmed as LPR to " + $Target.Uri + " with SNMP off. " + (Format-PortDetail -Snapshot $portSnap -Target $Target)
+        } else {
+            $status['PORT'].Detail = ("expected Standard TCP/IP port " + $script:PortName + " for " + $Target.Uri)
+        }
         $status['PAPER SOURCE'].Detail = "queue not installed"
         $status['OUTPUT'].Detail = "queue not installed"
         $status['SIDES'].Detail = "queue not installed"
@@ -4091,15 +4229,13 @@ function Get-QueueStatus {
                 $status['PORT'].State = 'PASS'
                 $status['PORT'].Detail = Format-PortDetail -Snapshot $snapshot -Target $Target
             } elseif ($portError) {
+                $status['PORT'].State = 'MANUAL'
                 $status['PORT'].Detail = ("expected " + $Target.Uri + "; could not read the port (" + $portError + ")")
+            } elseif ($snapshot) {
+                $status['PORT'].State = 'MANUAL'
+                $status['PORT'].Detail = "Port settings are not confirmed. " + (Format-PortDetail -Snapshot $snapshot -Target $Target)
             } else {
-                $got = 'missing'
-                if ($snapshot) {
-                    $snmp = 'off'
-                    if ($snapshot.SnmpEnabled) { $snmp = 'on' }
-                    $got = ("host " + $snapshot.Host + " queue " + $snapshot.Queue + " protocol " + $snapshot.Protocol + " port " + $snapshot.PortNumber + " byte counting " + $snapshot.ByteCount + " SNMP " + $snmp)
-                }
-                $status['PORT'].Detail = ("expected LPR queue " + $Target.Queue + ", byte counting on, SNMP off; found " + $got)
+                $status['PORT'].Detail = ("expected LPR queue " + $Target.Queue + ", byte counting on, SNMP off; port was not readable")
             }
         }
         $driverName = [string]$printer.DriverName
@@ -4151,7 +4287,48 @@ function Get-QueueStatus {
         $status['STALE QUEUE'].State = 'PASS'
         $status['STALE QUEUE'].Detail = 'absent'
     }
+    Set-ExtraReportLines $status
     return $status
+}
+
+function Get-StandaloneDriverStatus {
+    $selected = $null
+    try { $selected = Find-SelectedInstalledDriver } catch { $selected = $null }
+    if (-not $selected) {
+        return @{ State = 'FAIL'; Detail = ($script:ExactDriverName + ' is not installed') }
+    }
+    return (Get-DriverReport $selected)
+}
+
+function Set-ExtraReportLines {
+    param($Status)
+    if ($script:Cleanup) {
+        $Status['CLEANUP'].State = [string]$script:Cleanup.State
+        $Status['CLEANUP'].Detail = [string]$script:Cleanup.Detail
+    } else {
+        $Status['CLEANUP'].State = 'PASS'
+        $Status['CLEANUP'].Detail = 'not run'
+    }
+    if ($script:Firewall) {
+        $Status['FIREWALL'].State = [string]$script:Firewall.State
+        $Status['FIREWALL'].Detail = [string]$script:Firewall.Detail
+    } else {
+        $Status['FIREWALL'].State = 'PASS'
+        $Status['FIREWALL'].Detail = 'not run'
+    }
+    if ($script:Reachable) {
+        $Status['REACHABLE'].State = [string]$script:Reachable.State
+        $Status['REACHABLE'].Detail = [string]$script:Reachable.Detail
+    } else {
+        $Status['REACHABLE'].State = 'PASS'
+        $Status['REACHABLE'].Detail = 'not run (does not change the exit code)'
+    }
+    if ($script:PortNote -and [string]$script:PortNote.State -ne 'PASS') {
+        if ([string]$Status['PORT'].State -ne 'PASS') {
+            $Status['PORT'].State = 'MANUAL'
+            if ($script:PortNote.Detail) { $Status['PORT'].Detail = [string]$script:PortNote.Detail }
+        }
+    }
 }
 
 function Invoke-Verify {
@@ -4215,6 +4392,508 @@ function Invoke-Verify {
     return $code
 }
 
+function Test-SkipCleanup {
+    return ($env:REMAX_SKIP_CLEANUP -eq '1')
+}
+
+function Test-SkipFirewall {
+    return ($env:REMAX_SKIP_FIREWALL -eq '1')
+}
+
+function Test-CleanupPrinter {
+    param([string]$Name, [string]$PortName, [string[]]$Names, [string[]]$Ports)
+    foreach ($item in @($Names)) {
+        if ($Name -eq $item) { return $true }
+    }
+    foreach ($item in @($Ports)) {
+        if ($PortName -eq $item) { return $true }
+    }
+    return $false
+}
+
+function Get-CleanupReport {
+    param([bool]$Skipped, [string[]]$Done, [string[]]$Failed, [string]$Note)
+    if ($Skipped) {
+        return @{ State = 'PASS'; Detail = 'skipped (REMAX_SKIP_CLEANUP=1)' }
+    }
+    $doneText = ''
+    $failText = ''
+    if ($Done) { $doneText = ($Done -join '; ') }
+    if ($Failed) { $failText = ($Failed -join '; ') }
+    if ($failText) {
+        $detail = 'Partial cleanup. Failed: ' + $failText
+        if ($doneText) { $detail = $detail + '. Removed: ' + $doneText }
+        if ($Note) { $detail = $detail + '. ' + $Note }
+        return @{ State = 'PARTIAL'; Detail = $detail }
+    }
+    if (-not $doneText) {
+        $detail = 'nothing to remove'
+        if ($Note) { $detail = $detail + '. ' + $Note }
+        return @{ State = 'PASS'; Detail = $detail }
+    }
+    $detail = 'Removed ' + $doneText
+    if ($Note) { $detail = $detail + '. ' + $Note }
+    return @{ State = 'PASS'; Detail = $detail }
+}
+
+function Get-PnputilPublishedForOriginal {
+    param([string[]]$Lines, [string]$OriginalLeaf)
+    $published = ''
+    $leaf = $OriginalLeaf.ToLowerInvariant()
+    foreach ($line in @($Lines)) {
+        $text = [string]$line
+        if ($text -match '(?i)Published Name:\s*(oem\d+\.inf)') {
+            $published = $Matches[1]
+            continue
+        }
+        if ($text -match '(?i)Original Name:\s*(.+)$') {
+            $original = $Matches[1].Trim().ToLowerInvariant()
+            $originalLeaf = $original
+            $slash = $original.LastIndexOf('\')
+            $fwd = $original.LastIndexOf('/')
+            $cut = $slash
+            if ($fwd -gt $cut) { $cut = $fwd }
+            if ($cut -ge 0 -and $cut -lt ($original.Length - 1)) {
+                $originalLeaf = $original.Substring($cut + 1)
+            }
+            if ($published -and ($originalLeaf -eq $leaf)) { return $published }
+        }
+    }
+    return ''
+}
+
+function Get-BitdefenderKind {
+    param([string[]]$Names, [string[]]$Services)
+    $seen = $false
+    $gravity = $false
+    foreach ($service in @($Services)) {
+        if ($service -eq 'VSSERV' -or $service -eq 'bdservicehost' -or $service -eq 'EPSecurityService') { $seen = $true }
+        if ($service -eq 'EPSecurityService') { $gravity = $true }
+    }
+    foreach ($name in @($Names)) {
+        if ($name -match 'Bitdefender') { $seen = $true }
+        if ($name -match 'Endpoint Security') { $gravity = $true; $seen = $true }
+    }
+    if (-not $seen) { return '' }
+    if ($gravity) { return 'gravityzone' }
+    return 'consumer'
+}
+
+function Get-BitdefenderGuidance {
+    param([string]$Kind, [string]$HostAddress)
+    $steps = "Bitdefender: Protection > Firewall > Rules > Add rule: allow C:\Windows\System32\spoolsv.exe, TCP, remote " + $HostAddress + " port 515 (or set spoolsv.exe to Allow). Also Firewall > Settings/Network adapters: set the office network to Home/Office (Trusted), not Public."
+    if ($Kind -eq 'gravityzone') {
+        return "Bitdefender GravityZone (Endpoint Security). " + $steps + " If managed by GravityZone, add the rule in the GravityZone firewall policy."
+    }
+    return "Consumer Bitdefender, not GravityZone Endpoint Security. " + $steps + " If managed by GravityZone, add the rule in the GravityZone firewall policy."
+}
+
+function Test-ThirdPartySecurityProduct {
+    param([string]$DisplayName)
+    if ([string]::IsNullOrWhiteSpace($DisplayName)) { return $false }
+    if ($DisplayName -match 'Windows Defender') { return $false }
+    if ($DisplayName -match 'Microsoft Defender') { return $false }
+    return $true
+}
+
+function Get-RemaxFirewallRule {
+    param($Target)
+    $root = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($root)) { $root = 'C:\Windows' }
+    $root = $root.TrimEnd('\')
+    $program = $root + '\System32\spoolsv.exe'
+    return @{
+        Name          = 'RemaxSecure Print (spoolsv)'
+        DisplayName   = 'RemaxSecure Print (spoolsv)'
+        Direction     = 'Outbound'
+        Action        = 'Allow'
+        Program       = $program
+        Protocol      = 'TCP'
+        RemoteAddress = [string]$Target.Host
+        RemotePort    = '515'
+        LocalPort     = '721-731'
+        Profile       = 'Any'
+    }
+}
+
+function Test-FirewallRuleScoped {
+    param($Rule)
+    if (-not $Rule) { return $false }
+    if ([string]$Rule.RemoteAddress -eq 'Any') { return $false }
+    if ([string]$Rule.RemoteAddress -eq '*') { return $false }
+    if ([string]$Rule.Program -notmatch 'spoolsv\.exe$') { return $false }
+    if ([string]$Rule.RemotePort -ne '515') { return $false }
+    if ([string]$Rule.LocalPort -ne '721-731') { return $false }
+    if ([string]$Rule.Direction -ne 'Outbound') { return $false }
+    if ([string]$Rule.Action -ne 'Allow') { return $false }
+    if ([string]$Rule.DisplayName -match 'File and Printer Sharing') { return $false }
+    return $true
+}
+
+function Get-ReachableDetail {
+    param([bool]$Ok, [bool]$Bitdefender, [string]$HostAddress, [string]$ErrorText)
+    if ($Ok) {
+        return ("TCP " + $HostAddress + " port 515 accepted a connection.")
+    }
+    $detail = "TCP " + $HostAddress + " port 515 did not connect."
+    if ($ErrorText) { $detail = $detail + " " + $ErrorText }
+    if ($Bitdefender) {
+        $detail = $detail + " Bitdefender is present and is the likely cause. Allow spoolsv.exe to " + $HostAddress + " port 515 in Bitdefender."
+    }
+    return $detail
+}
+
+function Remove-CleanupPrinters {
+    param([string[]]$Names, [string[]]$Ports, $Done, $Failed)
+    $targets = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($printer in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            $name = [string]$printer.Name
+            $port = [string]$printer.PortName
+            if (Test-CleanupPrinter -Name $name -PortName $port -Names $Names -Ports $Ports) {
+                if (-not $targets.Contains($name)) { [void]$targets.Add($name) }
+            }
+        }
+    } catch {
+        Write-Remax ("Could not list printers for cleanup: " + $_.Exception.Message)
+        [void]$Failed.Add("list printers: " + $_.Exception.Message)
+        return
+    }
+    if ($targets.Count -eq 0) {
+        Write-Remax "Cleanup: no RemaxSecure or target-port queues to remove."
+        return
+    }
+    foreach ($name in @($targets.ToArray())) {
+        Write-Remax ("Remove-Printer -Name '" + $name + "'")
+        try {
+            Remove-Printer -Name $name -ErrorAction Stop
+            Write-Remax ("Removed printer " + $name)
+            [void]$Done.Add("printer " + $name)
+        } catch {
+            Write-Remax ("Remove-Printer " + $name + " failed: " + $_.Exception.Message)
+            [void]$Failed.Add("printer " + $name + ": " + $_.Exception.Message)
+        }
+    }
+}
+
+function Remove-CleanupPort {
+    param([string]$Name, $Done, $Failed)
+    $exists = $false
+    try {
+        $snapshot = Get-PortSnapshot $Name
+        if ($snapshot) { $exists = $true }
+    } catch { }
+    if (-not $exists) {
+        $key = Get-PortMonitorKey $Name
+        if (Test-Path -LiteralPath $key) { $exists = $true }
+    }
+    if (-not $exists) {
+        Write-Remax ("Cleanup: port " + $Name + " is not present.")
+        return
+    }
+    Write-Remax ("Remove-PrinterPort -Name '" + $Name + "'")
+    $removed = $false
+    try {
+        Remove-PrinterPort -Name $Name -ErrorAction Stop
+        $removed = $true
+    } catch {
+        Write-Remax ("Remove-PrinterPort " + $Name + " failed: " + $_.Exception.Message + ". Restarting the Print Spooler and retrying.")
+        [void](Restart-PrintSpooler)
+        try {
+            Remove-PrinterPort -Name $Name -ErrorAction Stop
+            $removed = $true
+        } catch {
+            Write-Remax ("Remove-PrinterPort " + $Name + " failed again: " + $_.Exception.Message)
+        }
+    }
+    if (-not $removed) {
+        try {
+            if (Remove-PortRegistryKey $Name) {
+                [void](Restart-PrintSpooler)
+                $removed = $true
+            }
+        } catch {
+            Write-Remax ("Port registry cleanup for " + $Name + " failed: " + $_.Exception.Message)
+            [void]$Failed.Add("port " + $Name + ": " + $_.Exception.Message)
+            return
+        }
+    }
+    if ($removed) {
+        Write-Remax ("Removed port " + $Name)
+        [void]$Done.Add("port " + $Name)
+    } else {
+        [void]$Failed.Add("port " + $Name + " could not be removed")
+    }
+}
+
+function Remove-CleanupDriver {
+    param($Done, $Failed)
+    $name = $script:ExactDriverName
+    $busy = ''
+    try {
+        foreach ($printer in @(Get-Printer -ErrorAction SilentlyContinue)) {
+            if ([string]$printer.DriverName -eq $name) { $busy = [string]$printer.Name }
+        }
+    } catch { }
+    if ($busy) {
+        $note = "driver left installed because " + $busy + " still uses it"
+        Write-Remax ("Cleanup: " + $note)
+        return $note
+    }
+    $instances = @()
+    try { $instances = @(Get-PrinterDriver -Name $name -ErrorAction Stop) } catch { $instances = @() }
+    if ($instances.Count -eq 0) {
+        Write-Remax ("Cleanup: printer driver " + $name + " is not installed.")
+    }
+    foreach ($inst in @($instances)) {
+        $envName = ''
+        try { $envName = [string]$inst.PrinterEnvironment } catch { $envName = '' }
+        Write-Remax ("Remove-PrinterDriver -Name '" + $name + "' -RemoveFromDriverStore")
+        try {
+            if ($envName) {
+                Remove-PrinterDriver -Name $name -PrinterEnvironment $envName -RemoveFromDriverStore -ErrorAction Stop
+            } else {
+                Remove-PrinterDriver -Name $name -RemoveFromDriverStore -ErrorAction Stop
+            }
+            Write-Remax ("Removed printer driver " + $name)
+            [void]$Done.Add("driver " + $name)
+        } catch {
+            Write-Remax ("Remove-PrinterDriver -RemoveFromDriverStore failed: " + $_.Exception.Message)
+            try {
+                if ($envName) {
+                    Remove-PrinterDriver -Name $name -PrinterEnvironment $envName -ErrorAction Stop
+                } else {
+                    Remove-PrinterDriver -Name $name -ErrorAction Stop
+                }
+                Write-Remax ("Removed printer driver " + $name + " without deleting the store package yet.")
+                [void]$Done.Add("driver " + $name)
+            } catch {
+                Write-Remax ("Remove-PrinterDriver failed: " + $_.Exception.Message)
+                [void]$Failed.Add("driver " + $name + ": " + $_.Exception.Message)
+            }
+        }
+    }
+    $oem = ''
+    $pnputil = Join-Path $env:windir 'System32\pnputil.exe'
+    if (-not (Test-Path -LiteralPath $pnputil)) { $pnputil = 'pnputil.exe' }
+    try {
+        $enum = Invoke-LoggedProcess -FilePath $pnputil -ArgumentList @('/enum-drivers')
+        $oem = Get-PnputilPublishedForOriginal -Lines $enum.Lines -OriginalLeaf 'cns30ua64.inf'
+    } catch {
+        Write-Remax ("pnputil /enum-drivers failed: " + $_.Exception.Message)
+    }
+    if (-not $oem) {
+        try {
+            $drivers = @(Get-WindowsDriver -Online -ErrorAction Stop)
+            foreach ($driver in $drivers) {
+                $original = ''
+                try { $original = [string]$driver.OriginalFileName } catch { $original = '' }
+                if ($original -and ((Get-PathLeafAny $original).ToLowerInvariant() -eq 'cns30ua64.inf')) {
+                    try { $oem = [string]$driver.Driver } catch { $oem = '' }
+                    if ($oem) { break }
+                }
+            }
+        } catch {
+            Write-Remax ("Get-WindowsDriver during cleanup failed: " + $_.Exception.Message)
+        }
+    }
+    if ($oem) {
+        Write-Remax ("pnputil /delete-driver " + $oem + " /uninstall /force")
+        $deleted = Invoke-LoggedProcess -FilePath $pnputil -ArgumentList @('/delete-driver', $oem, '/uninstall', '/force')
+        if (Test-PnputilSuccess $deleted.Code) {
+            [void]$Done.Add("driver package " + $oem)
+        } else {
+            [void]$Failed.Add("pnputil /delete-driver " + $oem + " exit " + $deleted.Code)
+        }
+    }
+    return ''
+}
+
+function Invoke-RemaxCleanup {
+    param($Target)
+    if (Test-SkipCleanup) {
+        Write-Remax "REMAX_SKIP_CLEANUP=1. Leaving the existing queue, port, and driver."
+        return (Get-CleanupReport -Skipped $true -Done @() -Failed @() -Note '')
+    }
+    Write-Remax "Clean slate: removing the RemaxSecure queue, its ports, then the Canon PS3 driver."
+    $done = New-Object System.Collections.Generic.List[string]
+    $failed = New-Object System.Collections.Generic.List[string]
+    $names = @($script:PrinterName, $script:StaleName, 'RemaxSecure_LPR')
+    $ports = @($script:PortName, $script:LegacyPortName, $script:DefaultHost)
+    if ($Target -and $Target.Host) {
+        $withHost = New-Object System.Collections.Generic.List[string]
+        foreach ($port in $ports) { if ($port -and -not $withHost.Contains($port)) { [void]$withHost.Add($port) } }
+        if (-not $withHost.Contains([string]$Target.Host)) { [void]$withHost.Add([string]$Target.Host) }
+        $ports = @($withHost.ToArray())
+    }
+    Remove-CleanupPrinters -Names $names -Ports $ports -Done $done -Failed $failed
+    foreach ($port in @($ports)) {
+        Remove-CleanupPort -Name $port -Done $done -Failed $failed
+    }
+    $note = Remove-CleanupDriver -Done $done -Failed $failed
+    return (Get-CleanupReport -Skipped $false -Done @($done.ToArray()) -Failed @($failed.ToArray()) -Note $note)
+}
+
+function Write-SecurityCenterProducts {
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($className in @('AntiVirusProduct', 'FirewallProduct')) {
+        try {
+            $rows = @(Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName $className -ErrorAction Stop)
+            if ($rows.Count -eq 0) {
+                Write-Remax ($className + " returned no products.")
+            }
+            foreach ($row in $rows) {
+                $display = ''
+                $state = ''
+                try { $display = [string]$row.displayName } catch { $display = '' }
+                try { $state = [string]$row.productState } catch { $state = '' }
+                Write-Remax ($className + " displayName='" + $display + "' productState=" + $state)
+                if ($display) { [void]$names.Add($display) }
+            }
+        } catch {
+            Write-Remax ($className + " was not readable: " + $_.Exception.Message)
+        }
+    }
+    return @($names.ToArray())
+}
+
+function Write-FirewallProfiles {
+    try {
+        $profiles = @(Get-NetFirewallProfile -ErrorAction Stop)
+        foreach ($profile in $profiles) {
+            Write-Remax ("Firewall profile " + $profile.Name + " enabled=" + $profile.Enabled)
+        }
+    } catch {
+        Write-Remax ("Get-NetFirewallProfile failed: " + $_.Exception.Message)
+    }
+}
+
+function Get-PresentServiceNames {
+    param([string[]]$Names)
+    $found = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($Names)) {
+        try {
+            $svc = Get-Service -Name $name -ErrorAction Stop
+            if ($svc) {
+                [void]$found.Add($name)
+                Write-Remax ("Service " + $name + " status=" + $svc.Status)
+            }
+        } catch { }
+    }
+    return @($found.ToArray())
+}
+
+function Remove-RemaxFirewallRule {
+    param([string]$Name)
+    foreach ($mode in @('Name', 'DisplayName')) {
+        try {
+            $rules = @()
+            if ($mode -eq 'Name') {
+                $rules = @(Get-NetFirewallRule -Name $Name -ErrorAction SilentlyContinue)
+            } else {
+                $rules = @(Get-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue)
+            }
+            foreach ($rule in $rules) {
+                if (-not $rule) { continue }
+                Remove-NetFirewallRule -InputObject $rule -ErrorAction Stop
+                Write-Remax ("Removed firewall rule (" + $mode + ") " + $Name)
+            }
+        } catch {
+            Write-Remax ("Removing firewall rule by " + $mode + " failed: " + $_.Exception.Message)
+        }
+    }
+}
+
+function Add-RemaxFirewallRule {
+    param($Target)
+    $rule = Get-RemaxFirewallRule $Target
+    if (-not (Test-FirewallRuleScoped $rule)) {
+        Write-Remax "Refusing to add a firewall rule that is not limited to spoolsv.exe and the printer."
+        return $false
+    }
+    Remove-RemaxFirewallRule -Name $rule.Name
+    Write-Remax ("New-NetFirewallRule " + $rule.DisplayName + " program=" + $rule.Program + " TCP remote " + $rule.RemoteAddress + ":" + $rule.RemotePort + " local " + $rule.LocalPort)
+    try {
+        New-NetFirewallRule -Name $rule.Name -DisplayName $rule.DisplayName -Direction Outbound -Action Allow -Program $rule.Program -Protocol TCP -RemoteAddress $rule.RemoteAddress -RemotePort $rule.RemotePort -LocalPort $rule.LocalPort -Profile Any -Enabled True -ErrorAction Stop | Out-Null
+        Write-Remax ("Added Windows Firewall outbound rule " + $rule.DisplayName)
+        return $true
+    } catch {
+        Write-Remax ("New-NetFirewallRule failed: " + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Invoke-RemaxFirewall {
+    param($Target)
+    if (Test-SkipFirewall) {
+        Write-Remax "REMAX_SKIP_FIREWALL=1. Not adding a firewall rule."
+        $script:Firewall = @{ State = 'PASS'; Detail = 'skipped (REMAX_SKIP_FIREWALL=1)' }
+        $script:BitdefenderKind = ''
+        return
+    }
+    $productNames = @(Write-SecurityCenterProducts)
+    Write-FirewallProfiles
+    $services = @(Get-PresentServiceNames -Names @('VSSERV', 'bdservicehost', 'EPSecurityService'))
+    $kind = Get-BitdefenderKind -Names $productNames -Services $services
+    $script:BitdefenderKind = $kind
+    $thirdParty = $false
+    $thirdNames = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($productNames)) {
+        if (Test-ThirdPartySecurityProduct $name) {
+            $thirdParty = $true
+            [void]$thirdNames.Add($name)
+        }
+    }
+    if ($kind) { $thirdParty = $true }
+    $added = Add-RemaxFirewallRule -Target $Target
+    if ($kind) {
+        $detail = Get-BitdefenderGuidance -Kind $kind -HostAddress $Target.Host
+        if ($added) {
+            $detail = "Windows Firewall outbound rule RemaxSecure Print (spoolsv) was added. Bitdefender is not modified by this script. " + $detail
+        }
+        $script:Firewall = @{ State = 'MANUAL'; Detail = $detail }
+        Write-Remax $detail
+        return
+    }
+    if ($thirdParty) {
+        $shown = 'a third-party security product'
+        if ($thirdNames.Count -gt 0) { $shown = ($thirdNames -join ', ') }
+        $detail = $shown + " is installed. This script does not change that product. Allow C:\Windows\System32\spoolsv.exe to " + $Target.Host + ":515 TCP in that product."
+        if ($added) {
+            $detail = "Windows Firewall outbound rule RemaxSecure Print (spoolsv) was added. " + $detail
+        }
+        $script:Firewall = @{ State = 'MANUAL'; Detail = $detail }
+        Write-Remax $detail
+        return
+    }
+    if ($added) {
+        $script:Firewall = @{ State = 'PASS'; Detail = "Windows Firewall outbound rule RemaxSecure Print (spoolsv): spoolsv.exe TCP to " + $Target.Host + " port 515, local ports 721-731, all profiles." }
+        return
+    }
+    $script:Firewall = @{ State = 'MANUAL'; Detail = "Windows Firewall rule RemaxSecure Print (spoolsv) was not added. Allow spoolsv.exe to " + $Target.Host + " port 515 TCP." }
+}
+
+function Invoke-RemaxReachability {
+    param($Target)
+    $bitdefender = $false
+    if ($script:BitdefenderKind) { $bitdefender = $true }
+    try {
+        $test = Test-NetConnection -ComputerName $Target.Host -Port 515 -WarningAction SilentlyContinue
+        $ok = $false
+        if ($test -and $test.TcpTestSucceeded) { $ok = $true }
+        $detail = Get-ReachableDetail -Ok $ok -Bitdefender $bitdefender -HostAddress $Target.Host -ErrorText ''
+        $state = 'FAIL'
+        if ($ok) { $state = 'PASS' }
+        $script:Reachable = @{ State = $state; Detail = $detail }
+    } catch {
+        $script:Reachable = @{
+            State  = 'FAIL'
+            Detail = (Get-ReachableDetail -Ok $false -Bitdefender $bitdefender -HostAddress $Target.Host -ErrorText $_.Exception.Message)
+        }
+    }
+    Write-Remax ("REACHABLE " + $script:Reachable.State + " " + $script:Reachable.Detail)
+}
+
 function Invoke-Install {
     if (-not (Test-WindowsHost)) {
         Write-RemaxLine "This installer is for Windows."
@@ -4245,8 +4924,12 @@ function Invoke-Install {
         Write-RemaxLine ("PrintManagement module is not available: " + $_.Exception.Message)
         return 1
     }
+    $script:Cleanup = Invoke-RemaxCleanup -Target $target
     $status = New-StatusMap
-    $staleOk = Remove-StaleQueue
+    $staleOk = $true
+    if (-not (Test-SkipCleanup)) {
+        $staleOk = Remove-StaleQueue
+    }
     if ($staleOk) {
         $status['STALE QUEUE'].State = 'PASS'
         $status['STALE QUEUE'].Detail = 'absent'
@@ -4292,11 +4975,26 @@ function Invoke-Install {
     $driverName = [string]$selected.Name
     Write-Remax ("Using driver " + $driverName)
     try { Write-AssistServiceNote } catch { }
+    $portResult = $null
     try {
-        Ensure-LprPort $target | Out-Null
+        $portResult = Ensure-LprPort $target
+    } catch {
+        Write-Remax ("Port setup failed: " + $_.Exception.Message)
+        $portResult = @{ State = 'MANUAL'; Detail = $_.Exception.Message; Snapshot = $null }
+    }
+    if ($portResult) { $script:PortNote = $portResult }
+    try { Invoke-RemaxFirewall -Target $target } catch {
+        Write-Remax ("Firewall step failed: " + $_.Exception.Message)
+        $script:Firewall = @{ State = 'MANUAL'; Detail = $_.Exception.Message }
+    }
+    try { Invoke-RemaxReachability -Target $target } catch {
+        Write-Remax ("Reachability test failed: " + $_.Exception.Message)
+        $script:Reachable = @{ State = 'FAIL'; Detail = $_.Exception.Message }
+    }
+    try {
         Ensure-PrinterQueue -DriverName $driverName -Target $target
     } catch {
-        Write-Remax ("Queue setup failed: " + $_.Exception.Message)
+        Write-Remax ("Queue setup failed: " + $_.Exception.Message + ". Continuing to the report.")
         $status = Get-QueueStatus $target
         if ($status['PRINTER'].State -eq 'FAIL') {
             $status['PRINTER'].Detail = ("setup failed: " + $_.Exception.Message)
@@ -4518,7 +5216,58 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.3') 'version string is 1.2.3'
+    Assert-Remax ($script:Version -eq '1.2.4') 'version string is 1.2.4'
+    $writable = @(Get-WritablePortPropertyNames)
+    $sawHost = $false
+    foreach ($propName in $writable) { if ($propName -eq 'HostAddress') { $sawHost = $true } }
+    Assert-Remax (-not $sawHost) 'CIM port update does not include HostAddress'
+    Assert-Remax (($writable -join ',') -eq 'Queue,Protocol,ByteCount,SNMPEnabled') 'only writable port properties are queued'
+    Assert-Remax (Test-CleanupPrinter -Name 'RemaxSecure' -PortName 'Other' -Names @('RemaxSecure', 'RemaxSecure_COLOUR', 'RemaxSecure_LPR') -Ports @('172.16.105.21', 'RemaxSecure_LPR')) 'RemaxSecure queue is removed'
+    Assert-Remax (Test-CleanupPrinter -Name 'Office' -PortName '172.16.105.21' -Names @('RemaxSecure') -Ports @('172.16.105.21', 'RemaxSecure_LPR')) 'a queue on the printer port is removed'
+    Assert-Remax (-not (Test-CleanupPrinter -Name 'Office' -PortName 'USB001' -Names @('RemaxSecure', 'RemaxSecure_COLOUR', 'RemaxSecure_LPR') -Ports @('172.16.105.21', 'RemaxSecure_LPR'))) 'an unrelated queue is kept'
+    $cleanSkip = Get-CleanupReport -Skipped $true -Done @() -Failed @() -Note ''
+    Assert-Remax ($cleanSkip.State -eq 'PASS') 'REMAX_SKIP_CLEANUP is a passing cleanup line'
+    $cleanFail = Get-CleanupReport -Skipped $false -Done @('printer RemaxSecure') -Failed @('port 172.16.105.21') -Note ''
+    Assert-Remax ($cleanFail.State -eq 'PARTIAL') 'a failed cleanup step is PARTIAL'
+    $cleanOk = Get-CleanupReport -Skipped $false -Done @() -Failed @() -Note ''
+    Assert-Remax ($cleanOk.State -eq 'PASS' -and $cleanOk.Detail -eq 'nothing to remove') 'empty cleanup passes'
+    Assert-Remax ((Get-ResultLabel @('PASS', 'PARTIAL')) -eq 'PARTIAL') 'PARTIAL line makes the result PARTIAL'
+    Assert-Remax ((Get-ResultLabel @('PASS', 'FAIL')) -eq 'FAIL') 'FAIL still wins over other lines'
+    $enumSample = @(
+        'Published Name:     oem93.inf',
+        'Original Name:      cns30ua64.inf',
+        'Class Name:         Printers',
+        'Published Name:     oem10.inf',
+        'Original Name:      other.inf'
+    )
+    Assert-Remax ((Get-PnputilPublishedForOriginal -Lines $enumSample -OriginalLeaf 'cns30ua64.inf') -eq 'oem93.inf') 'oem inf for cns30ua64.inf is selected'
+    Assert-Remax ((Get-BitdefenderKind -Names @('Bitdefender Antivirus') -Services @()) -eq 'consumer') 'Bitdefender name is consumer'
+    Assert-Remax ((Get-BitdefenderKind -Names @('Bitdefender Endpoint Security') -Services @()) -eq 'gravityzone') 'Endpoint Security is GravityZone'
+    Assert-Remax ((Get-BitdefenderKind -Names @() -Services @('EPSecurityService')) -eq 'gravityzone') 'EPSecurityService is GravityZone'
+    Assert-Remax ((Get-BitdefenderKind -Names @() -Services @('VSSERV')) -eq 'consumer') 'VSSERV without Endpoint Security is consumer'
+    Assert-Remax ((Get-BitdefenderKind -Names @('Windows Defender') -Services @()) -eq '') 'Defender alone is not Bitdefender'
+    $bdText = Get-BitdefenderGuidance -Kind 'gravityzone' -HostAddress '172.16.105.21'
+    Assert-Remax ($bdText -match 'GravityZone firewall policy') 'GravityZone steps name the policy'
+    Assert-Remax ($bdText -match 'spoolsv.exe') 'Bitdefender steps name spoolsv.exe'
+    Assert-Remax ($bdText -match 'Home/Office') 'Bitdefender steps name the trusted network'
+    $consumerText = Get-BitdefenderGuidance -Kind 'consumer' -HostAddress '172.16.105.21'
+    Assert-Remax ($consumerText -match 'Consumer Bitdefender') 'consumer Bitdefender is labeled'
+    Assert-Remax (-not (Test-ThirdPartySecurityProduct 'Microsoft Defender Antivirus')) 'Microsoft Defender is not third party'
+    Assert-Remax (Test-ThirdPartySecurityProduct 'Bitdefender Antivirus') 'Bitdefender is third party'
+    $fw = Get-RemaxFirewallRule @{ Host = '172.16.105.21' }
+    Assert-Remax (Test-FirewallRuleScoped $fw) 'firewall rule is limited to spoolsv.exe and the printer'
+    Assert-Remax ($fw.LocalPort -eq '721-731') 'LPR source ports 721-731 are included'
+    Assert-Remax ($fw.DisplayName -eq 'RemaxSecure Print (spoolsv)') 'firewall rule name is stable'
+    $reachBd = Get-ReachableDetail -Ok $false -Bitdefender $true -HostAddress '172.16.105.21' -ErrorText ''
+    Assert-Remax ($reachBd -match 'likely cause') 'a failed 515 test names Bitdefender when it is present'
+    $savedSkipClean = $env:REMAX_SKIP_CLEANUP
+    $env:REMAX_SKIP_CLEANUP = '1'
+    Assert-Remax (Test-SkipCleanup) 'REMAX_SKIP_CLEANUP=1 skips cleanup'
+    if ($null -eq $savedSkipClean) { Remove-Item Env:REMAX_SKIP_CLEANUP -ErrorAction SilentlyContinue } else { $env:REMAX_SKIP_CLEANUP = $savedSkipClean }
+    $savedSkipFw = $env:REMAX_SKIP_FIREWALL
+    $env:REMAX_SKIP_FIREWALL = '1'
+    Assert-Remax (Test-SkipFirewall) 'REMAX_SKIP_FIREWALL=1 skips the firewall rule'
+    if ($null -eq $savedSkipFw) { Remove-Item Env:REMAX_SKIP_FIREWALL -ErrorAction SilentlyContinue } else { $env:REMAX_SKIP_FIREWALL = $savedSkipFw }
     Assert-Remax (Test-PnputilSuccess 0) 'pnputil exit 0 is success'
     Assert-Remax (Test-PnputilSuccess 259) 'pnputil exit 259 means the package is already present'
     Assert-Remax (Test-PnputilSuccess 3010) 'pnputil exit 3010 is success with a restart'

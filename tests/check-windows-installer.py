@@ -106,7 +106,13 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.3",
+        "1.2.4",
+        "REMAX_SKIP_CLEANUP",
+        "REMAX_SKIP_FIREWALL",
+        "Get-WritablePortPropertyNames",
+        "Bitdefender",
+        "spoolsv.exe",
+        "721-731",
         "ConvertTo-ExitCode",
         "Test-PnputilSuccess",
         "Get-PnputilPublishedName",
@@ -192,10 +198,15 @@ def main() -> int:
     if "Set-ItemProperty" in installer:
         fail("Set-ItemProperty is not used. Port monitor values use New-ItemProperty in Set-PortRegistry.")
     port_fn = installer.split("function Set-PortRegistry", 1)[1].split("function ", 1)[0]
-    if port_fn.count("New-ItemProperty") != 4:
-        fail("Set-PortRegistry must be the only writer, with four New-ItemProperty calls")
-    if installer.count("New-ItemProperty") != 4:
+    if port_fn.count("New-ItemProperty") != 7:
+        fail("Set-PortRegistry must be the only writer, with seven New-ItemProperty calls")
+    if installer.count("New-ItemProperty") != 7:
         fail("New-ItemProperty is only allowed for the Standard TCP/IP port monitor")
+    if ".HostAddress =" in installer or "HostAddress =" in installer:
+        fail("HostAddress is read-only and must not be assigned")
+    for token in ("HostName", "IPAddress", "SNMP Enabled", "Byte Count"):
+        if token not in port_fn:
+            fail(f"Set-PortRegistry is missing {token}")
     for line in installer.splitlines():
         if "PrinterDriverData" in line and (
             "New-ItemProperty" in line or "Set-ItemProperty" in line or "SetValue" in line
