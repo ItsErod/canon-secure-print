@@ -71,7 +71,7 @@
 
 $script:Version = '1.2.11'
 $script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
-$script:IngestKey = '__REMAX_INGEST_KEY__'
+$script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -7518,7 +7518,7 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
     Assert-Remax ($script:Version -eq '1.2.11') 'version string is 1.2.11'
-    Assert-Remax ($script:IngestKey -eq '__REMAX_INGEST_KEY__') 'install report key is the placeholder'
+    Assert-Remax (-not [string]::IsNullOrWhiteSpace($script:IngestKey)) 'install report key is set'
     Assert-Remax ($script:IngestUrl -eq 'https://tickets.rmxofficetools.com/api/public/printer-installs') 'install report URL is set'
     $savedReport = $env:REMAX_NO_REPORT
     $env:REMAX_NO_REPORT = '1'

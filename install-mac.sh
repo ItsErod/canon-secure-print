@@ -31,7 +31,7 @@ set -o pipefail
 
 VERSION="1.2.11"
 INGEST_URL="https://tickets.rmxofficetools.com/api/public/printer-installs"
-INGEST_KEY_DEFAULT="__REMAX_INGEST_KEY__"
+INGEST_KEY_DEFAULT="7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e"
 RAW_INSTALL_URL="https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh"
 
 # Proprietary Canon PS driver. Not stored in this repo.
