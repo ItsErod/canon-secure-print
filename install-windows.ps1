@@ -127,7 +127,7 @@ if ($env:REMAX_MODE -eq 'verify' -and $script:Mode -eq 'install') {
 
 function Write-RemaxLine {
     param([string]$Line)
-    if ($script:CaptureReport -and $script:ReportLines) {
+    if ($script:CaptureReport -and $null -ne $script:ReportLines) {
         [void]$script:ReportLines.Add($Line)
     }
     try {
@@ -925,6 +925,9 @@ function Send-RemaxInstallReport {
         try { $logText = [System.IO.File]::ReadAllText($script:LogFile) } catch { $logText = '' }
     }
     $logText = Get-ReportTail -Text $logText -MaxBytes 409600
+    $reportBody = ''
+    if ($null -ne $script:ReportText) { $reportBody = [string]$script:ReportText }
+    Write-Remax ("Install report text length " + $reportBody.Length)
     $body = @{
         print_username = [string]$script:LastPrintUser
         computer_name  = [string]$env:COMPUTERNAME
@@ -936,7 +939,7 @@ function Send-RemaxInstallReport {
         mac_address     = [string]$adapter.Mac
         network         = (Get-RemaxReportNetwork)
         script_version  = [string]$script:Version
-        report_text     = [string]$script:ReportText
+        report_text     = $reportBody
         log_text        = $logText
     }
     $json = $body | ConvertTo-Json -Depth 6 -Compress
@@ -3386,6 +3389,12 @@ public static class RemaxWin1210 {
     }
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct PRINTER_DEFAULTS {
+        public string pDatatype;
+        public IntPtr pDevMode;
+        public int DesiredAccess;
+    }
     [DllImport("winspool.drv", SetLastError = true)]
     public static extern bool ClosePrinter(IntPtr hPrinter);
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -3393,8 +3402,17 @@ public static class RemaxWin1210 {
     [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern bool SetPrinter(IntPtr hPrinter, uint Level, IntPtr pPrinter, uint Command);
     public static int ApplyDevMode(string printer, byte[] devmode, uint level) {
-        IntPtr handle;
-        if (!OpenPrinter(printer, out handle, IntPtr.Zero)) return Marshal.GetLastWin32Error();
+        IntPtr handle = IntPtr.Zero;
+        PRINTER_DEFAULTS defaults = new PRINTER_DEFAULTS();
+        defaults.pDatatype = null;
+        defaults.pDevMode = IntPtr.Zero;
+        defaults.DesiredAccess = 0x000F000C;
+        IntPtr access = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(PRINTER_DEFAULTS)));
+        Marshal.StructureToPtr(defaults, access, false);
+        bool opened = OpenPrinter(printer, out handle, access);
+        int openErr = opened ? 0 : Marshal.GetLastWin32Error();
+        Marshal.FreeHGlobal(access);
+        if (!opened) return openErr;
         IntPtr raw = Marshal.AllocHGlobal(devmode.Length);
         Marshal.Copy(devmode, 0, raw, devmode.Length);
         try {
@@ -3936,10 +3954,10 @@ function Get-CanonComboChoices {
         $nearOnly = $true
         try {
             $root = [System.Windows.Automation.AutomationElement]::RootElement
-            $pid = [int]$element.Current.ProcessId
+            $winPid = [int]$element.Current.ProcessId
             $condPid = New-Object System.Windows.Automation.PropertyCondition(
                 [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
-                $pid
+                $winPid
             )
             $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $condPid)
             foreach ($window in @($windows)) {
@@ -4414,6 +4432,103 @@ function Write-UserNameProbe {
         }
         Write-Remax ("User name probe " + $where + ": " + $length + " bytes, ASCII hits " + $asciiHits + ", UTF-16 hits " + $utfHits)
     }
+    try { Search-UserNameLocations -Name $OldName } catch {
+        Write-Remax ("Wider user name search failed: " + $_.Exception.Message)
+    }
+}
+
+function Write-UserNameByteHits {
+    param([string]$Where, [byte[]]$Data, [string]$Name)
+    if ($null -eq $Data -or [string]::IsNullOrWhiteSpace($Name)) { return 0 }
+    $count = 0
+    foreach ($hit in @(Find-UserNameHits -Data $Data -Name $Name)) {
+        $count = $count + 1
+        Write-Remax ("User name hit " + $hit.Encoding + " offset " + $hit.Offset + " field " + $hit.FieldChars + " in " + $Where)
+    }
+    return $count
+}
+
+function Search-RegistryTreeForUserName {
+    param([string]$Root, [string]$Name)
+    if (-not (Test-Path -LiteralPath $Root)) {
+        Write-Remax ("User name search key is not present: " + $Root)
+        return
+    }
+    $items = New-Object System.Collections.Generic.List[object]
+    try { [void]$items.Add((Get-Item -LiteralPath $Root)) } catch { }
+    try {
+        foreach ($child in @(Get-ChildItem -LiteralPath $Root -Recurse -ErrorAction SilentlyContinue)) {
+            if ($child) { [void]$items.Add($child) }
+        }
+    } catch { }
+    foreach ($item in @($items.ToArray())) {
+        $names = @()
+        try { $names = @($item.GetValueNames()) } catch { $names = @() }
+        foreach ($valueName in @($names)) {
+            $label = [string]$valueName
+            if ([string]::IsNullOrEmpty($label)) { $label = '(default)' }
+            $where = $item.PSPath + ' value ' + $label
+            $raw = $null
+            try { $raw = $item.GetValue($valueName) } catch { $raw = $null }
+            if ($raw -is [string]) {
+                $text = [string]$raw
+                $at = $text.ToLowerInvariant().IndexOf($Name.ToLowerInvariant())
+                if ($at -ge 0) {
+                    Write-Remax ("User name hit string offset " + $at + " in " + $where)
+                }
+                continue
+            }
+            $bytes = $raw -as [byte[]]
+            if ($bytes -and $bytes.Length -gt 0) {
+                [void](Write-UserNameByteHits -Where $where -Data $bytes -Name $Name)
+            }
+        }
+    }
+}
+
+function Search-FolderForUserName {
+    param([string]$Root, [string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Root) -or -not (Test-Path -LiteralPath $Root)) {
+        Write-Remax ("User name search folder is not present: " + $Root)
+        return
+    }
+    $cutoff = (Get-Date).AddDays(-30)
+    $files = @()
+    try { $files = @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue) } catch { $files = @() }
+    foreach ($file in @($files)) {
+        if (-not $file) { continue }
+        $ext = [string]$file.Extension
+        $ext = $ext.ToLowerInvariant()
+        if ($ext -ne '.dat' -and $ext -ne '.ini' -and $ext -ne '.xml') { continue }
+        if ($file.Length -gt 1048576) { continue }
+        if ($file.LastWriteTime -lt $cutoff) { continue }
+        $bytes = $null
+        try { $bytes = [System.IO.File]::ReadAllBytes($file.FullName) } catch { $bytes = $null }
+        if ($bytes) {
+            [void](Write-UserNameByteHits -Where $file.FullName -Data $bytes -Name $Name)
+        }
+    }
+}
+
+function Search-UserNameLocations {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return }
+    $printerData = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\' + $script:PrinterName + '\PrinterDriverData'
+    Search-RegistryTreeForUserName -Root $printerData -Name $Name
+    Search-RegistryTreeForUserName -Root 'HKCU:\Printers\Settings' -Name $Name
+    Search-RegistryTreeForUserName -Root 'HKCU:\Software\Canon' -Name $Name
+    Search-RegistryTreeForUserName -Root 'HKLM:\SOFTWARE\Canon' -Name $Name
+    Search-RegistryTreeForUserName -Root 'HKCU:\Printers\Connections' -Name $Name
+    $folders = New-Object System.Collections.Generic.List[string]
+    if ($env:APPDATA) { [void]$folders.Add((Join-Path $env:APPDATA 'Canon')) }
+    if ($env:LOCALAPPDATA) { [void]$folders.Add((Join-Path $env:LOCALAPPDATA 'Canon')) }
+    if ($env:ProgramData) { [void]$folders.Add((Join-Path $env:ProgramData 'Canon')) }
+    $windowsRoot = $env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($windowsRoot)) { $windowsRoot = 'C:\Windows' }
+    [void]$folders.Add((Join-Path $windowsRoot 'System32\spool\drivers\x64\3'))
+    foreach ($folder in @($folders)) {
+        Search-FolderForUserName -Root $folder -Name $Name
+    }
 }
 
 function Write-UserNameRegistryHits {
@@ -4564,16 +4679,16 @@ function Write-WindowCandidate {
     if (-not ('RemaxWin1210' -as [type])) { return '' }
     $title = ''
     $class = ''
-    $pid = 0
+    $winPid = 0
     try { $title = [string][RemaxWin1210]::WindowTitle($Hwnd) } catch { $title = '' }
     try { $class = [string][RemaxWin1210]::WindowClass($Hwnd) } catch { $class = '' }
-    try { $pid = [int][RemaxWin1210]::WindowPid($Hwnd) } catch { $pid = 0 }
+    try { $winPid = [int][RemaxWin1210]::WindowPid($Hwnd) } catch { $winPid = 0 }
     if ([string]::IsNullOrWhiteSpace($title)) { return '' }
     $proc = ''
-    if ($pid -gt 0) {
-        try { $proc = [string](Get-Process -Id $pid -ErrorAction Stop).ProcessName } catch { $proc = '' }
+    if ($winPid -gt 0) {
+        try { $proc = [string](Get-Process -Id $winPid -ErrorAction Stop).ProcessName } catch { $proc = '' }
     }
-    Write-Remax ("Window hwnd=" + $Hwnd + " pid=" + $pid + " process=" + $proc + " class=" + $class + " title='" + $title + "'")
+    Write-Remax ("Window hwnd=" + $Hwnd + " pid=" + $winPid + " process=" + $proc + " class=" + $class + " title='" + $title + "'")
     return $title
 }
 
@@ -6480,7 +6595,10 @@ function Write-StatusReport {
     Write-RemaxLine (Get-ReportFooter -Result $result -PrintUser $PrintUser -Verify $Verify)
     $script:ReportDone = $true
     $script:CaptureReport = $false
-    if ($script:ReportLines) { $script:ReportText = ($script:ReportLines -join "`r`n") }
+    $script:ReportText = ''
+    if ($null -ne $script:ReportLines -and $script:ReportLines.Count -gt 0) {
+        $script:ReportText = [string]::Join("`r`n", $script:ReportLines.ToArray())
+    }
     $script:LastResult = $result
     $script:LastPrintUser = $PrintUser
     $script:LastStatus = $Status
@@ -7637,6 +7755,13 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
     Assert-Remax ($script:Version -eq '1.2.12') 'version string is 1.2.12'
+    $pidClean = $true
+    if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
+        $pidText = [System.IO.File]::ReadAllText($PSCommandPath)
+        $pidPattern = '(?i)(?<![A-Za-z0-9_])\$(global:|script:|local:|private:)?pid\s*='
+        if ([regex]::IsMatch($pidText, $pidPattern)) { $pidClean = $false }
+    }
+    Assert-Remax $pidClean 'the script does not assign the automatic PID variable'
     Assert-Remax (Test-VersionAtLeast -Have '1.2.12' -Want '1.2.11') '1.2.12 is at least 1.2.11'
     Assert-Remax (Test-VersionAtLeast -Have '1.2.12' -Want '1.2.12') 'the same version is new enough'
     Assert-Remax (-not (Test-VersionAtLeast -Have '1.2.10' -Want '1.2.12')) '1.2.10 is older than 1.2.12'

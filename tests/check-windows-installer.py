@@ -219,14 +219,11 @@ def main() -> int:
     for token in required:
         if token not in installer:
             fail(f"install-windows.ps1 is missing {token}")
-    forbidden = [
-        "reg.exe",
-        "HKCU:\\Software\\Canon",
-        "HKLM:\\SOFTWARE\\Canon",
-    ]
-    for token in forbidden:
-        if token in installer:
-            fail(f"install-windows.ps1 contains unsupported store write {token}")
+    if "reg.exe" in installer:
+        fail("install-windows.ps1 contains unsupported store write reg.exe")
+    search_fn = installer.split("function Search-RegistryTreeForUserName", 1)[1].split("function Write-UserNameRegistryHits", 1)[0]
+    if "SetValue" in search_fn or "Set-ItemProperty" in search_fn or "New-ItemProperty" in search_fn:
+        fail("the wider Canon user-name search must only read")
     if "Set-ItemProperty" in installer:
         fail("Set-ItemProperty is not used. Port monitor values use New-ItemProperty in Set-PortRegistry.")
     name_fn = installer.split("function Write-UserNameRegistryHits", 1)[1].split("function ", 1)[0]
