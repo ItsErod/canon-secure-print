@@ -1,8 +1,8 @@
 # Remax Secure Printer
 
-Terminal installer for the RE/MAX Escarpment Canon secure queue. Mac agents run one command in Terminal. Windows agents run one command in an elevated PowerShell window, type their print username, and the queue is installed. There is no `.app`. The Mac installer does not click the Canon utility. The Windows installer opens Printer properties and sets Device Settings.
+Terminal installer for the RE/MAX Escarpment Canon secure queue. Mac agents run one command in Terminal. Windows agents run one command in an elevated PowerShell window, type their print username, and the queue is installed. There is no `.app`. The Mac installer does not click the Canon utility. The Windows installer sets the recorded Device Settings, using printer properties when the driver exposes them and Printer properties UI Automation when it does not.
 
-After a successful install the queue matches all of these:
+After a successful Mac install the queue matches all of these:
 
 | Setting | Value |
 | --- | --- |
@@ -211,13 +211,13 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.1.0**. It creates the same queue name and LPR target as the Mac script, then sets Device Settings. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.10**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
 ```
 
-`irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. The window asks for the print username (the name on the copier, not the Windows logon). Leave the Printer properties window alone while it is open. The script closes it. The report is **INSTALL REPORT**.
+`irm` is `Invoke-RestMethod`. `iex` is `Invoke-Expression`. Execution policy does not apply to `iex`. The window asks for the print username. The format is last name + first initial, lowercase, for example `tsiogase` (the name on the copier, not the Windows logon). Leave the Printer properties window alone while it is open. The script closes it. The report is **INSTALL REPORT**.
 
 To skip the prompt, set the name in that same elevated window. A variable set in a normal window is dropped when User Account Control starts the elevated one:
 
@@ -249,51 +249,93 @@ Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/m
 powershell -NoProfile -ExecutionPolicy Bypass -File $s -Verify
 ```
 
-The Windows port is a Standard TCP/IP port named `RemaxSecure_LPR`, protocol LPR, TCP port 515, queue name `RemaxSecure`, host `172.16.105.21`. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. LPR byte counting is on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place and removes a leftover queue named `RemaxSecure_COLOUR`.
+Every install starts with a clean slate unless `REMAX_SKIP_CLEANUP=1`. It removes queues named `RemaxSecure`, `RemaxSecure_COLOUR`, and `RemaxSecure_LPR`, plus any other queue on port `172.16.105.21` or `RemaxSecure_LPR`, then those ports, then the driver `Canon iR-ADV C5235/5240 PS3` when no remaining queue uses it. A locked port is retried after a Print Spooler restart, and the Standard TCP/IP port registry key is removed only if `Remove-PrinterPort` still fails. Cleanup never stops the run. The report line is `CLEANUP` `PASS` or `PARTIAL`.
+
+The Windows port is a Standard TCP/IP port named `172.16.105.21` (the host address), protocol LPR, TCP port 515, queue name `RemaxSecure`, LPR byte counting on, SNMP off. `Add-PrinterPort` creates it with `-LprHostAddress`, `-LprQueueName`, and `-LprByteCounting`. `HostAddress` is not written afterwards, because that CIM property is read-only. SNMP, queue, protocol, and byte counting are written as writable CIM properties and as registry values `Protocol`, `Queue`, `Byte Count`, `SNMP Enabled`, `HostName`, `IPAddress`, and `PortNumber`. If the existing port still does not match, and no queue is using it, the script removes it and creates it again. A port tweak that still does not match is `PORT` `MANUAL` and the queue install continues. The `DRIVER` line is the installed Canon driver even when the queue was not created. That is `lpd://172.16.105.21/RemaxSecure`. It does not need the optional LPR Port Monitor feature. The recorded check is `Add-PrinterPort -Name 172.16.105.21 -LprHostAddress 172.16.105.21 -LprQueueName RemaxSecure -LprByteCounting`, then SNMP disabled. Readback uses `Get-PrinterPort` and the port monitor key `HKLM:\SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\172.16.105.21` (`Protocol=2`, `Queue=RemaxSecure`, `Byte Count=1`, `SNMP Enabled=0`). Installer 1.1.0 used a port named `RemaxSecure_LPR`. Re-running this installer moves `RemaxSecure` onto the host-named port and removes `RemaxSecure_LPR` when no other queue uses it. LPR byte counting stays on unless `REMAX_LPR_BYTE_COUNT` is `0`. Re-running the script updates `RemaxSecure` in place, leaves it not shared and not the default, and removes a leftover queue named `RemaxSecure_COLOUR`.
+
+After cleanup, the script reads Security Center antivirus and firewall products (`displayName` and `productState`) and whether each Windows Defender Firewall profile is enabled. Unless `REMAX_SKIP_FIREWALL=1`, it removes and re-adds one outbound Windows Firewall rule named `RemaxSecure Print (spoolsv)`: program `%SystemRoot%\System32\spoolsv.exe`, TCP, remote address `172.16.105.21`, remote port `515`, local ports `721-731`, all profiles. It does not enable File and Printer Sharing and it does not allow every address. If Security Center or the services `VSSERV`, `bdservicehost`, or `EPSecurityService` show Bitdefender, the script does not change Bitdefender. `FIREWALL` is `MANUAL` and the log prints the steps: Protection, Firewall, Rules, allow `C:\Windows\System32\spoolsv.exe` to that printer, and set the office adapter to Home/Office (Trusted), not Public. `EPSecurityService` or the name Endpoint Security is called out as GravityZone, where the rule belongs in the GravityZone firewall policy. Any other third-party product is also `MANUAL`, naming that product. `FIREWALL` is `PASS` only when no third-party product is present and the Windows rule was added. After the port exists, the script checks whether the PC is on the office network named `REMAX`. It reads the Wi-Fi SSID from `netsh wlan show interfaces` and the wired or wireless profile name from `Get-NetConnectionProfile`. The match is the exact name `REMAX`, ignoring case. Detected names are written to the log. On `REMAX`, `Test-NetConnection 172.16.105.21 -Port 515` is reported as `REACHABLE` `PASS` or `FAIL`. Off that network, the connection test is skipped and the line is `REACHABLE` `SKIP` with the current SSID or profile. `REACHABLE` does not change the exit code. If the test fails while Bitdefender is present, the line says Bitdefender is the likely cause.
 
 | Check | What the script can do |
 | --- | --- |
-| Queue, LPR port, driver | `Add-Printer` / `Add-PrinterPort`. Driver name must be Canon iR-ADV C5235/5240 PS or PS3. `Canon Generic Plus PS3` is accepted. UFR II and PCL are not used. |
-| One-sided | `Set-PrintConfiguration -DuplexingMode OneSided`, including again after Device Settings. |
-| Cassette Feeding Unit | Print ticket `OptCas2` when the driver publishes it. Otherwise Printer properties, Device Settings, **Cassette Feeding Unit** = On. `PASS` only after readback. |
-| Inner Finisher E1 | Print ticket `IFINE1` when the driver publishes it. Otherwise **Output Options** = **Inner Finisher E1**. `PASS` only after readback. |
-| Enter Name | **Set User Information** → **Settings** → **User Name** = the print username, and **Default Value Settings** → **Name to Set for User Name** = that entered name (Enter Name, not Logon name). The Windows driver does not read the Mac `*%INFO_PrPr` block. `PASS` only after both controls read back. |
-| Config. Profile | Set only when that combo is on the page. The model-specific driver in the fleet screenshot does not have it. For **Canon Generic Plus PS3**, it must be **iR-ADV C5235/5240**. |
+| Driver | Name must be exactly `Canon iR-ADV C5235/5240 PS3`, the x64 build of Canon PS3 Printer Driver Ver. 30.00 (Setup.exe file version 30.0.0.1). `PASS` when that name is installed and any file version the spooler exposes is 30.0.0.1 or 30.00. A different Canon PS name can still create the queue, and the line stays `MANUAL`. UFR II and PCL are not used. Canon Driver Information Assist Service is not required. |
+| Cleanup | Removes the old RemaxSecure queue, port, and Canon PS3 driver before install, unless `REMAX_SKIP_CLEANUP=1`. `PARTIAL` if a removal step fails. |
+| Port | Standard TCP/IP port named `172.16.105.21`, LPR, queue `RemaxSecure`, byte counting on, SNMP off. Host, queue, and protocol 2 with SNMP off are `PASS` when byte count was not exposed. A real mismatch is `MANUAL`. |
+| Firewall | Windows Firewall rule for `spoolsv.exe` to `172.16.105.21:515`. Third-party products, including Bitdefender, stay `MANUAL`. |
+| Reachable | Port 515 only when the PC is on the `REMAX` network. Otherwise `SKIP`. Does not change the exit code. |
+| Printer | `RemaxSecure`, not shared, not the default. |
+| 1-sided | `Set-PrintConfiguration -DuplexingMode OneSided` (1-sided Printing), including again after Device Settings. |
+| Cassette Feeding Unit | Restored from the PrintUI settings file. The report says `source: dat` when that restore is confirmed. A click of the **Cassette Feeding Unit** checkbox is only the fallback. |
+| Inner Finisher E1 | Restored from the same file as **Output Options**. A click of that combo is only the fallback. |
+| Set User Information | Checkbox **Set User Information** on. **Get Device Information** is left alone. |
+| User Name | Written after the settings file, even when **Set User Information** is already checked. **Settings...** opens **User Information Settings**. The **User Name** box there is set and checked. **Default Value Settings...** is also set when that button is present. Readback must show the typed name. A mismatch is retried once, then `USER NAME` `FAIL` with the value that was read. |
 
-`RESULT: PASS` and exit code 0 mean every line passed, including Device Settings readback. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. Exit code 2 does not throw when the script is run with `irm | iex`. Exit code 1 means the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong.
+After the queue and 1-sided printing are in place, and before the print username is set, the installer downloads `remaxsecure-device-settings.dat` (44,692 bytes, SHA256 `a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279`) and restores it with `rundll32 printui.dll,PrintUIEntry /Sr /n "RemaxSecure" /a "<dat>" d g r`. The `r` flag resolves the computer name stored in the file. `REMAX_DEVICE_DAT` can point at a local path or an https URL. The size and SHA256 check applies only to the built-in URL. The script logs the process exit code and `LASTEXITCODE`, compares `PrinterDriverData` before and after, and opens Printer properties only to read the Cassette Feeding Unit checkbox and the Output Options combo. It does not click those controls when the restore is confirmed. `PAPER SOURCE` and `OUTPUT` then say `PASS` with `source: dat`. 1-sided printing is set again after the restore, and the queue name and port are put back if the restore changed them. The Print Spooler is restarted only when that readback does not confirm the file. If the restore fails or the readback shows the controls unset, the script falls back to clicking Cassette Feeding Unit and Inner Finisher E1. `REMAX_PS_OUTPUT` sets **PS Output from Application** only when it is set, and only on that click fallback. The file already contains the PS Output value from the export.
 
-`-Verify` opens Printer properties, reads Device Settings, and clicks Cancel. It does not save changes. `REMAX_DEVICE_UI=0` skips that dialog.
+The User Name box is written with ValuePattern, then WM_SETTEXT plus an edit-change notice, then by typing after the input lock is released. Each step reads the box back. User Information Settings is found by its window title on any process, and the edit is taken with FindWindowEx. Buttons are posted and given at most 10 seconds. If a dialog stays open it is closed with WM_CLOSE or Escape. The 60 second username watchdog unlocks input and does not close Printer properties or that dialog. A case-insensitive `Tsiogase` hit in Default DevMode or the per-user DevMode is patched and passed to SetPrinter. USER NAME is PASS only when the reopened dialog shows the typed name, ignoring case.
 
-When the report says `MANUAL`, automation did not see the control or the readback did not match. On the agent PC:
+The print username is applied only after that restore, including any Print Spooler restart, has finished. The settings file is not restored again. The script searches `PrinterDriverData` and the per-user DevMode keys `HKCU\Printers\DevModePerUser` and `HKCU\Printers\DevModes2` for ASCII or UTF-16 `tsiogase` (the name in the exported global DEVMODE). Each hit is logged and, when the typed name fits in that field, replaced there before the dialog runs. The dialog is still used, and it writes the name even if the checkbox is already on. Readback has to show the typed name. One mismatch is retried, and a second mismatch is `USER NAME` `FAIL` with the value that was read.
+
+The console shows a progress bar for Cleanup, Firewall, Download driver, Install driver, Port, Printer, Defaults, Device Settings, Verify, and Report. `Write-Progress` uses the progress stream, so the bar is not copied into the log. A `Stage:` line is written to the log. The bar is cleared with `Write-Progress -Completed` when the report is printed and again if the script exits early.
+
+While Printer properties is open, the script locks the keyboard and mouse with `BlockInput`. It prints: `Keyboard and mouse are locked for up to 2 minutes while printer settings are applied. Press Ctrl+Alt+Delete to unlock if needed.` The lock is released in a `finally` block, in the script trap, and on the way out of the script. A background runspace also calls `BlockInput(false)` after 120 seconds. If `BlockInput` returns false, the script logs that and continues. `REMAX_NO_INPUT_LOCK=1` skips the lock. The report line `INPUT LOCK` is informational and does not change the exit code.
+
+`RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. `RESULT: FAIL` and exit code 1 mean the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong. When the script is run with `irm | iex`, exit code 1 and exit code 2 do not throw. The report is printed, `LASTEXITCODE` is set, and the window stays open.
+
+`-Verify` reads printer properties, then opens Printer properties, reads Device Settings, and clicks Cancel. It does not save changes. `REMAX_DEVICE_UI=0` skips that dialog. The property read still runs.
+
+When the report says `MANUAL`, the property readback and the dialog readback did not confirm that line. On the agent PC:
 
 1. **Printer properties** for **RemaxSecure**, **Device Settings**.
-2. If the driver is **Canon Generic Plus PS3**, set **Config. Profile** to **iR-ADV C5235/5240**.
-3. **Cassette Feeding Unit** = On.
-4. **Output Options** = **Inner Finisher E1**.
-5. **Set User Information** → **Settings** → **User Name** = the print username.
-6. **Default Value Settings** → **Name to Set for User Name** = that entered name. Canon documents this separately from the Windows logon name.
+2. **Paper Source Options** = **Cassette Feeding Unit**.
+3. **Output Options** = **Inner Finisher E1**.
+4. Check **Set User Information**. Click the **Settings...** button on that row (not the one beside **Get Device Information**).
+5. The dialog title is **Default Value Settings**. Under **Name to Set for User Information:**, select **User Name** and type the print username in the box under that radio.
+6. Leave **Always Confirm User Information When Performing Secured Print** checked, **Confirm User Name When Printing** unchecked, and PIN blank. Click OK, then Apply, OK.
 7. Close Printer properties and open them again if they were already open.
 
-A secure-print PIN is not set. Do not treat a Windows print dialog as proof that Enter Name is set. Read the **INSTALL REPORT**.
+A secure-print PIN is not set. Do not treat a Windows print dialog as proof that the username is set. Read the **INSTALL REPORT**.
 
-The print-ticket path is tried first. On the fleet driver, PrintManagement does not publish `OptCas2` or `IFINE1`, so cassette, finisher, and Enter Name are set through the Device Settings dialog shown after installer 1.0.0 (Cassette unchecked, Output Options = None, Set User Information checked). `PASS` requires the same dialog to read back On, Inner Finisher E1, the print username, and an Enter Name mode. Logon name, Computer name, and User Account Name do not count.
+Device options are tried in this order:
 
-No Canon registry value is invented. Optional, if a later driver build does not expose those controls: on one reference PC, set Cassette and Inner Finisher E1 by hand, then capture printer-specific data and the global DEVMODE. Microsoft documents `d` as printer-specific data and `g` as the global DEVMODE. Do not add `2`. That flag also stores the port and the share.
+1. `Get-PrinterProperty` / `Set-PrinterProperty`, only when the driver already exposes one of a short list of `Config:*` names (`Config:PaperSourceOptions`, `Config:CNSrcOption`, `Config:CNPaperSource`, `Config:PaperSource`, `Config:CNFinisher`, `Config:OutputOptions`, `Config:CNOutputOption`, and the user-info names `Config:CNSetUserInfo`, `Config:SetUserInformation`, `Config:CNUserInformation`, `Config:CNUserName`, `Config:UserName`, `Config:CNSecureUserName`). A value is kept only when the same property reads back. A failed write is put back to the previous value.
+2. UI Automation of the controls named above, then the properties window is closed and opened again for readback.
+
+`PASS` on paper, output, Set User Information, and User Name requires one of those readbacks. A print-ticket `OptCas2` or `IFINE1` value is used only when the dialog was not opened (for example `REMAX_DEVICE_UI=0`) and the ticket still contains it. On the PS3 driver those ticket names are often absent, which is why the dialog is the fallback.
+
+### What was checked without the Canon driver installed
+
+`Get-PrinterProperty` is the supported spooler API for driver configuration. Microsoft documents it for printer properties, and PPD-based PostScript drivers sometimes surface installable options as `Config:*` names. Canon does not publish the v30.00 property names for **Paper Source Options** = **Cassette Feeding Unit** or for the **User Name** radio. This repo cannot query a live Canon driver, so those names are not confirmed. The script lists every property it sees in the log, writes only the candidate names above, and falls back to the recorded dialog.
+
+`HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\RemaxSecure\PrinterDriverData` and the printer key's DevMode values are private driver bytes. The script lists the value names and does not write them. Inventing a binary layout would risk a bad DEVMODE. The port-monitor values (`Protocol`, `Queue`, `Byte Count`, `SNMP Enabled`) are Windows spooler settings, not Canon data, and those are written.
+
+Optional, if a later driver build does not expose the dialog: on one reference PC, set the options by hand, then capture printer-specific data and the global DEVMODE. Microsoft documents `d` as printer-specific data and `g` as the global DEVMODE. Do not add `2`. That flag also stores the port and the share.
 
 ```powershell
 rundll32 printui.dll,PrintUIEntry /Ss /n "RemaxSecure" /a "$env:ProgramData\RemaxSecurePrinter\device-settings.dat" d g
 ```
 
-On later PCs, point the installer at that file. Enter Name is still filled from the username typed in that run, because a shared file would contain one person's name. The dialog still runs and is what the report trusts.
+On later PCs, point the installer at that file. The print username is still filled from the name typed in that run, because a shared file would contain one person's name. The dialog still runs unless `Get-PrinterProperty` already read back every Device Settings line.
 
 ```powershell
 $env:REMAX_DEVICE_DAT = "$env:ProgramData\RemaxSecurePrinter\device-settings.dat"
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
 ```
 
-This file is not in the repo. Agents do not need it when the Device Settings dialog matches the fleet screenshot.
+This file is not in the repo. Agents do not need it when the Device Settings dialog matches the recorded Windows 11 setup.
 
-If the Canon PS driver is missing, the report names what to install and lists the drivers already on the PC. Optional download, only when you host the package:
+If `Canon iR-ADV C5235/5240 PS3` is not already installed, the same one-liner downloads the public release asset and checks it before install:
+
+```text
+https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip
+SHA256 4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da
+26722033 bytes
+```
+
+The download uses `Invoke-WebRequest -UseBasicParsing` with TLS 1.2 and follows the GitHub 302 redirect. The file is saved as `download.zip` (or `.cab`, `.inf`, or `.exe` when that is the URL). Windows PowerShell 5.1 `Expand-Archive` rejects any other extension. A `PK` header is extracted as a zip even when the saved name is not `.zip`, using `System.IO.Compression.ZipFile` and then `Expand-Archive` only if that assembly does not load. A size or SHA256 mismatch stops the install and names both the value received and the value expected. The zip is not executed. `pnputil /add-driver /install` stages `x64/Driver/CNS30UA64.INF` (not `x64/misc/NullDriver/lasernull.inf`). The full pnputil output and exit code are written to the log. Exit 0 and 3010 mean staged. Exit 259 means the package is already present. The quoted model in `[Canon.NTamd64]` is exactly `Canon iR-ADV C5235/5240 PS3`. Registration does not point `-InfPath` at the temporary download. It tries `Add-PrinterDriver -Name` with no path, then the same command with the staged file under `C:\Windows\System32\DriverStore\FileRepository\cns30ua64.inf_amd64_*\CNS30UA64.INF` (from pnputil's `Published Name: oemNN.inf`, `Get-WindowsDriver -Online`, or that folder). If those fail, it tries `printui.exe /ia /m "<model>" /f "<store INF>"`, then `rundll32 printui.dll,PrintUIEntry /ia /m "<model>" /h x64 /v 3 /f "<store INF>"`. Each attempt and error is logged.
+
+`REMAX_CANON_PKG_URL` replaces that URL for one run. A different URL is not checked against this SHA256.
+
+If the Canon PS3 driver is still missing after that download, the report names the failure and lists the drivers already on the PC. Optional package, only when you host a different one:
 
 ```powershell
 $env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS-driver.zip'
@@ -317,9 +359,9 @@ Ethan, after this is on `main`:
 
 1. On a Windows agent PC that can route to `172.16.105.21`, open elevated PowerShell.
 2. Run the one-liner above with that agent's `REMAX_PRINT_USER`.
-3. Expect **RESULT: PASS** when the Canon PS driver is already installed and the Device Settings dialog matches the fleet screenshot. **RESULT: PARTIAL**, exit code 2, means the queue is in place and a Device Settings line could not be verified. Do those steps from the report, then run the installer again.
-4. Print one secure job only if you want to confirm the copier shows that Enter Name.
-5. Run `-Verify`. It reads Device Settings and clicks Cancel. It does not change the queue. `FAIL` on CASSETTE, FINISHER, or ENTER NAME means the value was read and is wrong.
+3. Expect **RESULT: PASS** when `Canon iR-ADV C5235/5240 PS3` 30.00 x64 is already installed and Device Settings read back. **RESULT: PARTIAL**, exit code 2, means the queue is in place and a line could not be verified. Do those steps from the report, then run the installer again.
+4. Print one secure job only if you want to confirm the copier shows that User Name.
+5. Run `-Verify`. It reads Device Settings and clicks Cancel. It does not change the queue. `FAIL` on PAPER SOURCE, OUTPUT, USER INFO, or USER NAME means the value was read and is wrong.
 6. Run the installer a second time. It must update `RemaxSecure` and not create a second queue.
 7. Logic only, no printers: `powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1 -SelfTest`
 
@@ -339,7 +381,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.1.0 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.10 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |
