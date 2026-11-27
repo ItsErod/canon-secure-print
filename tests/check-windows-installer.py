@@ -106,7 +106,10 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.8",
+        "1.2.9",
+        "TypeUnicode",
+        "NotifyEditChange",
+        "SendMessageTimeout",
         "Select-UiaTab",
         "UIAutomationTypes",
         "GetLastWin32Error",

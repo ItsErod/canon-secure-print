@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.8**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.9**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -270,6 +270,8 @@ After cleanup, the script reads Security Center antivirus and firewall products 
 | User Name | Written after the settings file, even when **Set User Information** is already checked. **Settings...** opens **User Information Settings**. The **User Name** box there is set and checked. **Default Value Settings...** is also set when that button is present. Readback must show the typed name. A mismatch is retried once, then `USER NAME` `FAIL` with the value that was read. |
 
 After the queue and 1-sided printing are in place, and before the print username is set, the installer downloads `remaxsecure-device-settings.dat` (44,692 bytes, SHA256 `a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279`) and restores it with `rundll32 printui.dll,PrintUIEntry /Sr /n "RemaxSecure" /a "<dat>" d g r`. The `r` flag resolves the computer name stored in the file. `REMAX_DEVICE_DAT` can point at a local path or an https URL. The size and SHA256 check applies only to the built-in URL. The script logs the process exit code and `LASTEXITCODE`, compares `PrinterDriverData` before and after, and opens Printer properties only to read the Cassette Feeding Unit checkbox and the Output Options combo. It does not click those controls when the restore is confirmed. `PAPER SOURCE` and `OUTPUT` then say `PASS` with `source: dat`. 1-sided printing is set again after the restore, and the queue name and port are put back if the restore changed them. The Print Spooler is restarted only when that readback does not confirm the file. If the restore fails or the readback shows the controls unset, the script falls back to clicking Cassette Feeding Unit and Inner Finisher E1. `REMAX_PS_OUTPUT` sets **PS Output from Application** only when it is set, and only on that click fallback. The file already contains the PS Output value from the export.
+
+The User Name box is written with ValuePattern, then WM_SETTEXT plus an edit-change notice, then by typing after the input lock is released. Each step reads the box back. Buttons in User Information Settings and Default Value Settings are posted and given at most 10 seconds. If a dialog stays open it is closed with WM_CLOSE or Escape. The username stage stops after 60 seconds. USER NAME is PASS only when the reopened dialog shows the typed name, ignoring case.
 
 The print username is applied only after that restore, including any Print Spooler restart, has finished. The settings file is not restored again. The script searches `PrinterDriverData` and the per-user DevMode keys `HKCU\Printers\DevModePerUser` and `HKCU\Printers\DevModes2` for ASCII or UTF-16 `tsiogase` (the name in the exported global DEVMODE). Each hit is logged and, when the typed name fits in that field, replaced there before the dialog runs. The dialog is still used, and it writes the name even if the checkbox is already on. Readback has to show the typed name. One mismatch is retried, and a second mismatch is `USER NAME` `FAIL` with the value that was read.
 
@@ -379,7 +381,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.8 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.9 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

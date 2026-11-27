@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.8
+# Remax Secure Printer - Windows installer 1.2.9
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,7 +69,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.8'
+$script:Version = '1.2.9'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -2802,8 +2802,42 @@ public static class RemaxWin32 {
         SendMessageGetText(hwnd, 0x000D, new IntPtr(512), sb);
         return sb.ToString();
     }
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr SendMessageTimeoutText(IntPtr hWnd, uint msg, IntPtr wParam, string text, uint flags, uint timeout, out IntPtr result);
+    [DllImport("user32.dll", EntryPoint="SendMessageTimeoutW", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern IntPtr SendMessageTimeoutGetText(IntPtr hWnd, uint msg, IntPtr wParam, StringBuilder text, uint flags, uint timeout, out IntPtr result);
     public static void SetWindowText(IntPtr hwnd, string text) {
         SendMessageText(hwnd, 0x000C, IntPtr.Zero, text);
+    }
+    public static bool SetWindowTextTimed(IntPtr hwnd, string text) {
+        IntPtr result;
+        IntPtr ret = SendMessageTimeoutText(hwnd, 0x000C, IntPtr.Zero, text ?? "", 0x0002, 2000, out result);
+        return ret != IntPtr.Zero;
+    }
+    public static string WindowTextTimed(IntPtr hwnd) {
+        StringBuilder sb = new StringBuilder(512);
+        IntPtr result;
+        SendMessageTimeoutGetText(hwnd, 0x000D, new IntPtr(512), sb, 0x0002, 2000, out result);
+        return sb.ToString();
+    }
+    public static void NotifyEditChange(IntPtr edit) {
+        IntPtr parent = GetParent(edit);
+        int id = GetDlgCtrlID(edit);
+        int wparam = (id & 0xFFFF) | (0x0300 << 16);
+        PostMessagePtr(parent, 0x0111, new IntPtr(wparam), edit);
+    }
+    public static void CloseWindow(IntPtr hwnd) {
+        PostMessagePtr(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero);
+    }
+    public static void SelectAllKeys() {
+        keybd_event(0x11, 0, 0, UIntPtr.Zero);
+        keybd_event(0x41, 0, 0, UIntPtr.Zero);
+        keybd_event(0x41, 0, 2, UIntPtr.Zero);
+        keybd_event(0x11, 0, 2, UIntPtr.Zero);
+    }
+    public static void TapEscape() {
+        keybd_event(0x1B, 0, 0, UIntPtr.Zero);
+        keybd_event(0x1B, 0, 2, UIntPtr.Zero);
     }
     public static int ButtonCheck(IntPtr hwnd) {
         return (int)SendMessagePtr(hwnd, 0x00F0, IntPtr.Zero, IntPtr.Zero);
@@ -2860,6 +2894,60 @@ public static class RemaxWin32 {
     public static void TapKey(byte vk) {
         keybd_event(vk, 0, 0, UIntPtr.Zero);
         keybd_event(vk, 0, 2, UIntPtr.Zero);
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HARDWAREINPUT {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
+    }
+    [StructLayout(LayoutKind.Explicit)]
+    public struct INPUTUNION {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+        [FieldOffset(0)] public HARDWAREINPUT hi;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+        public uint type;
+        public INPUTUNION u;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    public static void TypeUnicode(string text) {
+        if (string.IsNullOrEmpty(text)) return;
+        INPUT[] inputs = new INPUT[text.Length * 2];
+        for (int i = 0; i < text.Length; i++) {
+            ushort scan = text[i];
+            INPUT down = new INPUT();
+            down.type = 1;
+            down.u.ki.wScan = scan;
+            down.u.ki.dwFlags = 4;
+            INPUT up = new INPUT();
+            up.type = 1;
+            up.u.ki.wScan = scan;
+            up.u.ki.dwFlags = 4 | 2;
+            inputs[i * 2] = down;
+            inputs[i * 2 + 1] = up;
+        }
+        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
     }
 }
 '@
@@ -3168,28 +3256,123 @@ function Set-CanonCheck {
 
 function Set-CanonEdit {
     param($Snapshot, [string]$Text)
-    if (-not $Snapshot -or -not $Snapshot.Element) { return $false }
+    if ([string]::IsNullOrEmpty($Text)) {
+        if (-not $Snapshot -or -not $Snapshot.Element) { return $false }
+        try {
+            $pattern = $null
+            if ($Snapshot.Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+                if (-not $pattern.Current.IsReadOnly) { $pattern.SetValue('') }
+            }
+        } catch { }
+        try {
+            $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle
+            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
+                [void][RemaxWin32]::SetWindowTextTimed($hwnd, '')
+            }
+        } catch { }
+        return $true
+    }
+    $wrote = Set-UserNameEditText -Snapshot $Snapshot -Text $Text
+    return [bool]$wrote.Ok
+}
+
+function Get-EditChangeWParam {
+    param([int]$ControlId)
+    $id = $ControlId -band 65535
+    return ($id -bor (768 -shl 16))
+}
+
+function Read-LiveEditText {
+    param($Element)
+    $patternText = ''
+    $windowText = ''
+    if ($Element) {
+        try {
+            $pattern = $null
+            if ($Element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
+                $patternText = [string]$pattern.Current.Value
+            }
+        } catch { }
+        try {
+            $hwnd = [IntPtr]$Element.Current.NativeWindowHandle
+            if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
+                $windowText = [string][RemaxWin32]::WindowTextTimed($hwnd)
+            }
+        } catch { }
+    }
+    $value = $patternText
+    if ([string]::IsNullOrWhiteSpace($value)) { $value = $windowText }
+    return @{ Pattern = $patternText; Window = $windowText; Value = $value }
+}
+
+function Set-UserNameEditText {
+    param($Snapshot, [string]$Text)
+    $result = @{ Ok = $false; Method = 'none'; Value = '' }
+    if (-not $Snapshot -or -not $Snapshot.Element) { return $result }
     $element = $Snapshot.Element
+    $hwnd = [IntPtr]::Zero
+    try { $hwnd = [IntPtr]$element.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
     try {
         $pattern = $null
         if ($element.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
             if (-not $pattern.Current.IsReadOnly) {
                 $pattern.SetValue($Text)
                 Start-Sleep -Milliseconds 150
-                $got = [string]$pattern.Current.Value
-                if ($got -eq $Text) { return $true }
+                $read = Read-LiveEditText $element
+                Write-Remax ("User Name method ValuePattern.SetValue read-back pattern='" + $read.Pattern + "' window='" + $read.Window + "'")
+                if (Test-UserNameMatch $read.Value $Text) {
+                    $result.Ok = $true
+                    $result.Method = 'ValuePattern.SetValue'
+                    $result.Value = [string]$read.Value
+                    return $result
+                }
             }
         }
     } catch {
-        Write-Remax ("Edit value pattern failed: " + $_.Exception.Message)
+        Write-Remax ("User Name ValuePattern.SetValue failed: " + $_.Exception.Message)
     }
-    $hwnd = [IntPtr]::Zero
-    try { $hwnd = [IntPtr]$element.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
-    if ($hwnd -eq [IntPtr]::Zero) { return $false }
-    [RemaxWin32]::SetWindowText($hwnd, $Text)
-    Start-Sleep -Milliseconds 150
-    $got = [RemaxWin32]::WindowText($hwnd)
-    return ($got -eq $Text)
+    if ($hwnd -ne [IntPtr]::Zero -and ('RemaxWin32' -as [type])) {
+        $posted = $false
+        try { $posted = [bool][RemaxWin32]::SetWindowTextTimed($hwnd, $Text) } catch { $posted = $false }
+        try { [RemaxWin32]::NotifyEditChange($hwnd) } catch { }
+        Start-Sleep -Milliseconds 150
+        $read = Read-LiveEditText $element
+        Write-Remax ("User Name method WM_SETTEXT posted=" + $posted + " read-back pattern='" + $read.Pattern + "' window='" + $read.Window + "'")
+        if (Test-UserNameMatch $read.Value $Text) {
+            $result.Ok = $true
+            $result.Method = 'WM_SETTEXT'
+            $result.Value = [string]$read.Value
+            return $result
+        }
+        $paused = $false
+        try { $paused = Suspend-InputLock } catch { $paused = $false }
+        try {
+            Write-Remax "Input lock released so User Name keystrokes are not swallowed."
+            [void][RemaxWin32]::SetFocus($hwnd)
+            Start-Sleep -Milliseconds 100
+            [RemaxWin32]::SelectAllKeys
+            Start-Sleep -Milliseconds 80
+            [RemaxWin32]::TypeUnicode($Text)
+            Start-Sleep -Milliseconds 200
+        } catch {
+            Write-Remax ("User Name SendInput failed: " + $_.Exception.Message)
+        } finally {
+            if ($paused) {
+                try { Resume-InputLock } catch { }
+            }
+        }
+        $read = Read-LiveEditText $element
+        Write-Remax ("User Name method SendInput read-back pattern='" + $read.Pattern + "' window='" + $read.Window + "'")
+        if (Test-UserNameMatch $read.Value $Text) {
+            $result.Ok = $true
+            $result.Method = 'SendInput'
+            $result.Value = [string]$read.Value
+            return $result
+        }
+        $result.Value = [string]$read.Value
+    }
+    Write-Remax ("User Name write did not stick. Last read-back '" + $result.Value + "'.")
+    return $result
 }
 
 function Collapse-CanonCombo {
@@ -3506,10 +3689,11 @@ function Set-DefaultValueOnWindow {
     Start-Sleep -Milliseconds 250
     $elements = Get-UiaDescendants $Window
     $targets = Find-CanonDefaultValueTargets $elements
-    $wrote = $false
+    $nameOk = $false
     if ($targets.NameEdit) {
-        $wrote = Set-CanonEdit -Snapshot $targets.NameEdit -Text $PrintUser
-        Write-Remax ("User Name text box set: " + $wrote)
+        $wrote = Set-UserNameEditText -Snapshot $targets.NameEdit -Text $PrintUser
+        $nameOk = [bool]$wrote.Ok
+        Write-Remax ("Default Value Settings User Name method " + $wrote.Method + " read-back '" + $wrote.Value + "'")
     } else {
         Write-Remax "Text box under the User Name radio was not found."
     }
@@ -3527,7 +3711,7 @@ function Set-DefaultValueOnWindow {
         [void](Set-CanonEdit -Snapshot $targets.PinEdit -Text '')
         Write-Remax "Cleared the secured print PIN."
     }
-    return ($radioOk -and $wrote)
+    return ($radioOk -and $nameOk)
 }
 
 function Test-UserInformationTitle {
@@ -3761,16 +3945,77 @@ function Read-UserNameEditValue {
     return [string]$edit.Value
 }
 
+function Get-UserNameWaitMs {
+    param([int]$Cap)
+    if ($Cap -gt 10000) { $Cap = 10000 }
+    if ($Cap -lt 200) { $Cap = 200 }
+    if (-not $script:UserNameDeadline) { return $Cap }
+    $left = [int]([TimeSpan]($script:UserNameDeadline - [DateTime]::UtcNow)).TotalMilliseconds
+    if ($left -lt 200) { return 200 }
+    if ($left -gt $Cap) { return $Cap }
+    return $left
+}
+
+function Test-UserNameBudget {
+    if (-not $script:UserNameDeadline) { return $true }
+    return ([DateTime]::UtcNow -lt $script:UserNameDeadline)
+}
+
+function Open-ChildDialogFast {
+    param($Button, [int]$ProcessId, $Exclude, [string]$TitleLike, [string[]]$TitleAny)
+    if (-not $Button) { return $null }
+    if (-not (Test-UserNameBudget)) {
+        Write-Remax "Username stage exceeded 60 seconds before opening a dialog."
+        return $null
+    }
+    [void](Invoke-CanonButton -Snapshot $Button -How post)
+    $dlg = Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs (Get-UserNameWaitMs 10000) -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny
+    if ($dlg) { return $dlg }
+    if (-not (Test-UserNameBudget)) { return $null }
+    Write-Remax "Dialog did not open after BM_CLICK. Trying a background invoke."
+    [void](Invoke-CanonButton -Snapshot $Button -How invoke)
+    return (Wait-UiaTopWindow -ProcessId $ProcessId -Exclude $Exclude -TimeoutMs (Get-UserNameWaitMs 10000) -SkipProperties -TitleLike $TitleLike -TitleAny $TitleAny)
+}
+
 function Close-UserDialog {
     param($Window, [switch]$Save)
     $handle = [IntPtr]::Zero
     try { $handle = [IntPtr]$Window.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
-    if ($Save) {
-        [void](Click-DialogButton -Window $Window -Labels @('OK') -CloseHandle $handle)
+    if (-not $Window) { return }
+    $labels = @('Cancel', 'Close')
+    if ($Save) { $labels = @('OK') }
+    $elements = @()
+    try { $elements = Get-UiaDescendants $Window } catch { $elements = @() }
+    $button = Select-LabeledControl -Elements $elements -Labels $labels -ControlType 'Button'
+    if ($button) {
+        [void](Invoke-CanonButton -Snapshot $button -How post)
     } else {
-        [void](Click-DialogButton -Window $Window -Labels @('Cancel', 'Close') -CloseHandle $handle)
+        Write-Remax ("Dialog button " + ($labels -join '/') + " was not found.")
     }
-    [void](Wait-WindowClosed -Handle $handle -TimeoutMs 5000)
+    if ($handle -eq [IntPtr]::Zero) { return }
+    if (Wait-WindowClosed -Handle $handle -TimeoutMs (Get-UserNameWaitMs 10000)) { return }
+    Write-Remax "Dialog did not close within 10 seconds. Sending WM_CLOSE."
+    if ('RemaxWin32' -as [type]) {
+        try { [RemaxWin32]::CloseWindow($handle) } catch { }
+    }
+    if (Wait-WindowClosed -Handle $handle -TimeoutMs (Get-UserNameWaitMs 2000)) { return }
+    Write-Remax "Dialog still open. Sending Escape."
+    $paused = $false
+    try { $paused = Suspend-InputLock } catch { $paused = $false }
+    try {
+        if ('RemaxWin32' -as [type]) {
+            [void][RemaxWin32]::SetFocus($handle)
+            [RemaxWin32]::TapEscape
+        }
+    } catch { }
+    finally {
+        if ($paused) {
+            try { Resume-InputLock } catch { }
+        }
+    }
+    if (-not (Wait-WindowClosed -Handle $handle -TimeoutMs (Get-UserNameWaitMs 2000))) {
+        Write-Remax "Dialog remained open after WM_CLOSE and Escape."
+    }
 }
 
 function Update-DefaultValueDialog {
@@ -3778,7 +4023,7 @@ function Update-DefaultValueDialog {
     $result = @{ Opened = $false; Read = $null }
     $props = [IntPtr]::Zero
     try { $props = [IntPtr]$Window.Current.NativeWindowHandle } catch { $props = [IntPtr]::Zero }
-    $dlg = Open-ChildDialog -Button $Button -ProcessId $ProcessId -Exclude @($props) -TitleAny @('*User Information Settings*', '*Default Value Settings*')
+    $dlg = Open-ChildDialogFast -Button $Button -ProcessId $ProcessId -Exclude @($props) -TitleAny @('*User Information Settings*', '*Default Value Settings*')
     if (-not $dlg) {
         Write-Remax "User Information Settings did not open from Settings..."
         return $result
@@ -3795,17 +4040,21 @@ function Update-DefaultValueDialog {
         if (-not $ReadOnly) {
             $edit = Find-CanonEditByLabel -Elements $elements -Labels @('User Name')
             if ($edit) {
-                $wrote = Set-CanonEdit -Snapshot $edit -Text $PrintUser
+                $wrote = Set-UserNameEditText -Snapshot $edit -Text $PrintUser
+                Write-Remax ("User Information Settings User Name method " + $wrote.Method + " read-back '" + $wrote.Value + "'")
                 $elements = @()
                 try { $elements = Get-UiaDescendants $dlg } catch { $elements = @() }
-                $shown = Read-UserNameEditValue $elements
-                Write-Remax ("User Information Settings User Name set=" + $wrote + " verified '" + $shown + "'")
             } else {
                 Write-Remax "User Information Settings had no User Name text box."
             }
+            if (-not (Test-UserNameBudget)) {
+                Write-Remax "Username stage exceeded 60 seconds. Closing User Information Settings."
+                Close-UserDialog -Window $dlg
+                return $result
+            }
             $defaults = Select-LabeledControl -Elements $elements -Labels @('Default Value Settings') -ControlType 'Button'
             if ($defaults) {
-                $nested = Open-ChildDialog -Button $defaults -ProcessId $ProcessId -Exclude @($props) -TitleLike '*Default Value Settings*'
+                $nested = Open-ChildDialogFast -Button $defaults -ProcessId $ProcessId -Exclude @($props) -TitleLike '*Default Value Settings*'
                 $nestedTitle = ''
                 if ($nested) {
                     try { $nestedTitle = [string]$nested.Current.Name } catch { $nestedTitle = '' }
@@ -4704,26 +4953,79 @@ function Invoke-RemaxDeviceSettings {
     return $ui
 }
 
+function Start-UserNameWatchdog {
+    Stop-UserNameWatchdog
+    $script:UserNameDeadline = [DateTime]::UtcNow.AddSeconds(60)
+    $runner = [powershell]::Create()
+    $null = $runner.AddScript({
+        Start-Sleep -Seconds 60
+        $definition = @"
+using System;
+using System.Runtime.InteropServices;
+public static class RemaxUserNameWatch {
+    [DllImport("user32.dll")]
+    public static extern bool BlockInput(bool fBlockIt);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+}
+"@
+        try { Add-Type -TypeDefinition $definition -Language CSharp } catch { }
+        try { [void][RemaxUserNameWatch]::BlockInput($false) } catch { }
+        try {
+            $hwnd = [RemaxUserNameWatch]::GetForegroundWindow()
+            if ($hwnd -ne [IntPtr]::Zero) {
+                [void][RemaxUserNameWatch]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+            }
+        } catch { }
+    })
+    $script:UserNameWatch = $runner
+    $script:UserNameWatchHandle = $runner.BeginInvoke()
+}
+
+function Stop-UserNameWatchdog {
+    $runner = $script:UserNameWatch
+    $script:UserNameDeadline = $null
+    if (-not $runner) { return }
+    try { $runner.Stop() } catch { }
+    try {
+        if ($script:UserNameWatchHandle) { $runner.EndInvoke($script:UserNameWatchHandle) }
+    } catch { }
+    try { $runner.Dispose() } catch { }
+    $script:UserNameWatch = $null
+    $script:UserNameWatchHandle = $null
+}
+
 function Invoke-PrintUserName {
     param([string]$PrintUser)
+    Start-UserNameWatchdog
     $last = $null
-    $attempt = 1
-    while ($attempt -le 2) {
-        Write-Remax ("Setting print username '" + $PrintUser + "' after the Device Settings restore (attempt " + $attempt + ").")
-        try {
-            $last = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'user'
-        } catch {
-            Write-Remax ("Print username automation failed: " + $_.Exception.Message)
-            $last = New-DeviceUiResult
-            $last.Attempted = $true
-            $last.UserNameState = 'FAIL'
-            $last.UserNameDetail = "User Name was not set: " + $_.Exception.Message
+    try {
+        $attempt = 1
+        while ($attempt -le 2) {
+            if (-not (Test-UserNameBudget)) {
+                Write-Remax "Username stage exceeded 60 seconds."
+                break
+            }
+            Write-Remax ("Setting print username '" + $PrintUser + "' after the Device Settings restore (attempt " + $attempt + ").")
+            try {
+                $last = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'user'
+            } catch {
+                Write-Remax ("Print username automation failed: " + $_.Exception.Message)
+                $last = New-DeviceUiResult
+                $last.Attempted = $true
+                $last.UserNameState = 'FAIL'
+                $last.UserNameDetail = "User Name was not set: " + $_.Exception.Message
+            }
+            if ($last -and [string]$last.UserNameState -eq 'PASS') { return $last }
+            $shown = ''
+            if ($last) { $shown = [string]$last.UserNameDetail }
+            Write-Remax ("User Name attempt " + $attempt + " did not read back '" + $PrintUser + "'. " + $shown)
+            $attempt = $attempt + 1
         }
-        if ($last -and [string]$last.UserNameState -eq 'PASS') { return $last }
-        $shown = ''
-        if ($last) { $shown = [string]$last.UserNameDetail }
-        Write-Remax ("User Name attempt " + $attempt + " did not read back '" + $PrintUser + "'. " + $shown)
-        $attempt = $attempt + 1
+    } finally {
+        Stop-UserNameWatchdog
     }
     if (-not $last) { $last = New-DeviceUiResult }
     $last.Attempted = $true
@@ -6578,7 +6880,10 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.8') 'version string is 1.2.8'
+    Assert-Remax ($script:Version -eq '1.2.9') 'version string is 1.2.9'
+    Assert-Remax ((Get-EditChangeWParam 1001) -eq 50332649) 'EN_CHANGE notice includes the control id'
+    Assert-Remax (Test-UserNameMatch 'Tsiogase' 'tsiogase') 'user name read-back ignores case'
+    Assert-Remax (-not (Test-UserNameMatch 'Tsiogase' 'johns')) 'Tsiogase is not johns'
     Assert-Remax ($null -ne (Get-Command Select-UiaTab -ErrorAction SilentlyContinue)) 'Select-UiaTab is defined at script scope'
     $uiaCompile = Test-RemaxUiaHelperCompile
     Assert-Remax ($uiaCompile.Ok) ('UI helper compile: ' + $uiaCompile.Detail)
