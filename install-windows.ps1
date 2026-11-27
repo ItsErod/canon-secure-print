@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.10
+# Remax Secure Printer - Windows installer 1.2.11
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,7 +69,9 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.10'
+$script:Version = '1.2.11'
+$script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
+$script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -125,6 +127,9 @@ if ($env:REMAX_MODE -eq 'verify' -and $script:Mode -eq 'install') {
 
 function Write-RemaxLine {
     param([string]$Line)
+    if ($script:CaptureReport -and $script:ReportLines) {
+        [void]$script:ReportLines.Add($Line)
+    }
     try {
         [Console]::Out.WriteLine($Line)
     } catch {
@@ -152,6 +157,12 @@ function Test-WindowsHost {
 
 function Invoke-Complete {
     param([int]$Code)
+    if (-not $script:ReportSent -and ($script:Mode -eq 'install' -or $script:Mode -eq 'verify')) {
+        $script:ReportSent = $true
+        try { Send-RemaxInstallReport -ExitCode $Code } catch {
+            Write-RemaxLine ("REPORTED:     FAIL  " + $_.Exception.Message)
+        }
+    }
     $global:RemaxExitCode = $Code
     $global:LASTEXITCODE = $Code
     if (-not $script:RanAsFile) {
@@ -209,6 +220,8 @@ Environment (set them in the elevated PowerShell window):
   REMAX_PS_OUTPUT        Optional PS Output from Application value.
                          Unset leaves that combo unchanged.
   REMAX_NO_INPUT_LOCK    Set to 1 to leave the keyboard and mouse unlocked.
+  REMAX_NO_REPORT        Set to 1 to skip the install report upload.
+  REMAX_INGEST_KEY       Overrides the built-in install report key.
 
 Exit codes: 0 every line PASS, 2 queue installed and MANUAL lines remain, 1 failed.
 Exit code 1 and exit code 2 do not throw when the script is run with irm | iex.
@@ -657,6 +670,189 @@ function Test-RemaxAdmin {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-ElevatedInstallCommand {
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'REMAX_*' })) {
+        $value = ([string]$item.Value).Replace("'", "''")
+        [void]$lines.Add('$' + 'env:' + $item.Name + " = '" + $value + "'")
+    }
+    if ($script:Mode -eq 'verify' -and -not $env:REMAX_MODE) {
+        [void]$lines.Add('$' + "env:REMAX_MODE = 'verify'")
+    }
+    [void]$lines.Add("irm '" + $script:RawUrl + "' | iex")
+    return ($lines -join "`r`n")
+}
+
+function Start-RemaxElevatedRelaunch {
+    if (-not (Test-WindowsHost)) { return $false }
+    if ($script:Mode -eq 'selftest' -or $script:Mode -eq 'help' -or $script:Mode -eq 'usage-error') { return $false }
+    if (Test-RemaxAdmin) { return $false }
+    $command = Get-ElevatedInstallCommand
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($command)
+    $encoded = [Convert]::ToBase64String($bytes)
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
+    $arg = '-NoExit -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    try {
+        Start-Process -FilePath $powershell -Verb RunAs -ArgumentList $arg | Out-Null
+    } catch {
+        Write-RemaxLine "Elevation was declined. This installer needs an administrator PowerShell window. No changes were made."
+        exit 1
+    }
+    Write-RemaxLine "An elevated PowerShell window is opening. Finish the install there. This window will close."
+    exit 0
+}
+
+function Test-SkipInstallReport {
+    return ($env:REMAX_NO_REPORT -eq '1')
+}
+
+function Get-ReportTail {
+    param([string]$Text, [int]$MaxBytes)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    if ($MaxBytes -lt 1) { return '' }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    if ($bytes.Length -le $MaxBytes) { return $Text }
+    $start = $bytes.Length - $MaxBytes
+    return [System.Text.Encoding]::UTF8.GetString($bytes, $start, $MaxBytes)
+}
+
+function Get-RemaxOsCaption {
+    $caption = ''
+    $display = ''
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem
+        if ($os) { $caption = [string]$os.Caption }
+    } catch { }
+    $caption = $caption -replace '^Microsoft ', ''
+    try {
+        $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+        if ($cv.DisplayVersion) { $display = [string]$cv.DisplayVersion }
+    } catch { }
+    if ($display) { return ($caption.Trim() + ' ' + $display).Trim() }
+    return $caption.Trim()
+}
+
+function Get-PrimaryAdapter {
+    $ip = ''
+    $mac = ''
+    try {
+        $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction Stop | Sort-Object -Property RouteMetric | Select-Object -First 1
+        if ($route) {
+            $addr = Get-NetIPAddress -InterfaceIndex $route.InterfaceIndex -AddressFamily IPv4 -ErrorAction Stop |
+                Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' } |
+                Select-Object -First 1
+            if ($addr) { $ip = [string]$addr.IPAddress }
+            $nic = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction Stop
+            if ($nic -and $nic.MacAddress) { $mac = [string]$nic.MacAddress }
+        }
+    } catch { }
+    if (-not $ip) {
+        try {
+            $cfg = @(Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True')
+            foreach ($row in @($cfg)) {
+                foreach ($candidate in @($row.IPAddress)) {
+                    $text = [string]$candidate
+                    if ($text -match '^\d+\.\d+\.\d+\.\d+$' -and $text -notlike '127.*') {
+                        $ip = $text
+                        $mac = [string]$row.MACAddress
+                        break
+                    }
+                }
+                if ($ip) { break }
+            }
+        } catch { }
+    }
+    return @{ Ip = $ip; Mac = $mac }
+}
+
+function Get-RemaxReportNetwork {
+    try {
+        $status = Get-RemaxNetworkStatus
+        if ($status -and $status.OnRemax) { return 'REMAX' }
+    } catch { }
+    return 'OTHER'
+}
+
+function Send-RemaxInstallReport {
+    param([int]$ExitCode)
+    if (Test-SkipInstallReport) {
+        Write-RemaxLine 'REPORTED:     SKIP  REMAX_NO_REPORT=1'
+        return
+    }
+    $key = $script:IngestKey
+    if (-not [string]::IsNullOrWhiteSpace($env:REMAX_INGEST_KEY)) { $key = $env:REMAX_INGEST_KEY.Trim() }
+    $result = [string]$script:LastResult
+    if (-not $result) {
+        if ($ExitCode -eq 0) { $result = 'PASS' }
+        elseif ($ExitCode -eq 2) { $result = 'PARTIAL' }
+        else { $result = 'FAIL' }
+    }
+    $steps = New-Object PSObject
+    foreach ($label in @(Get-StatusLabels)) {
+        $state = 'not checked'
+        if ($script:LastStatus -and $script:LastStatus.ContainsKey($label)) {
+            $state = [string]$script:LastStatus[$label].State
+        }
+        $steps | Add-Member -NotePropertyName $label -NotePropertyValue $state -Force
+    }
+    $adapter = Get-PrimaryAdapter
+    $osUser = ''
+    try { $osUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $osUser = [string]$env:USERNAME }
+    $logText = ''
+    if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
+        try { $logText = [System.IO.File]::ReadAllText($script:LogFile) } catch { $logText = '' }
+    }
+    $logText = Get-ReportTail -Text $logText -MaxBytes 409600
+    $body = @{
+        print_username = [string]$script:LastPrintUser
+        computer_name  = [string]$env:COMPUTERNAME
+        os              = (Get-RemaxOsCaption)
+        overall_result  = $result
+        steps           = $steps
+        os_user         = $osUser
+        ip_address      = [string]$adapter.Ip
+        mac_address     = [string]$adapter.Mac
+        network         = (Get-RemaxReportNetwork)
+        script_version  = [string]$script:Version
+        report_text     = [string]$script:ReportText
+        log_text        = $logText
+    }
+    $json = $body | ConvertTo-Json -Depth 6 -Compress
+    $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $status = 0
+    $detail = ''
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($script:IngestUrl)
+        $request.Method = 'POST'
+        $request.ContentType = 'application/json; charset=utf-8'
+        $request.Timeout = 10000
+        $request.ReadWriteTimeout = 10000
+        $request.Headers.Add('Authorization', 'Bearer ' + $key)
+        $request.ContentLength = $payload.Length
+        $stream = $request.GetRequestStream()
+        try { $stream.Write($payload, 0, $payload.Length) } finally { $stream.Close() }
+        $response = $request.GetResponse()
+        try { $status = [int]$response.StatusCode } finally { $response.Close() }
+    } catch {
+        $web = $_.Exception
+        if ($web.Response) {
+            try { $status = [int]$web.Response.StatusCode } catch { $status = 0 }
+            try { $web.Response.Close() } catch { }
+        }
+        $detail = $_.Exception.Message
+    }
+    Write-Remax ("Install report HTTP status " + $status)
+    if ($detail) { Write-Remax ("Install report error: " + $detail) }
+    if ($status -eq 201) {
+        Write-RemaxLine 'REPORTED:     PASS'
+    } else {
+        $suffix = ''
+        if ($status -gt 0) { $suffix = ' HTTP ' + $status }
+        Write-RemaxLine ('REPORTED:     FAIL' + $suffix)
+    }
 }
 
 function Show-AdminHelp {
@@ -2746,7 +2942,7 @@ function Test-CalledHelpersDefined {
         'Get-Service', 'Start-Service', 'Restart-Service', 'Get-CimInstance', 'Set-CimInstance', 'Invoke-CimMethod',
         'Get-WindowsDriver', 'Expand-Archive',
         'Get-NetFirewallProfile', 'Get-NetFirewallRule', 'New-NetFirewallRule', 'Remove-NetFirewallRule',
-        'Get-NetConnectionProfile', 'Test-NetConnection'
+        'Get-NetConnectionProfile', 'Get-NetRoute', 'Get-NetIPAddress', 'Get-NetAdapter', 'Test-NetConnection'
     )) {
         $known[$cmd] = $true
     }
@@ -6120,6 +6316,8 @@ function Write-StatusReport {
     )
     Set-ExtraReportLines $Status
     Show-RemaxProgress 'Report'
+    $script:ReportLines = New-Object System.Collections.Generic.List[string]
+    $script:CaptureReport = $true
     $order = @(Get-StatusLabels)
     $states = @()
     foreach ($label in @(Get-ResultLabels)) { $states += [string]$Status[$label].State }
@@ -6162,6 +6360,11 @@ function Write-StatusReport {
     Write-RemaxLine "======================================================"
     Write-RemaxLine (Get-ReportFooter -Result $result -PrintUser $PrintUser -Verify $Verify)
     $script:ReportDone = $true
+    $script:CaptureReport = $false
+    if ($script:ReportLines) { $script:ReportText = ($script:ReportLines -join "`r`n") }
+    $script:LastResult = $result
+    $script:LastPrintUser = $PrintUser
+    $script:LastStatus = $Status
     Complete-RemaxProgress
     return $code
 }
@@ -7314,7 +7517,21 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.10') 'version string is 1.2.10'
+    Assert-Remax ($script:Version -eq '1.2.11') 'version string is 1.2.11'
+    Assert-Remax (-not [string]::IsNullOrWhiteSpace($script:IngestKey)) 'install report key is set'
+    Assert-Remax ($script:IngestUrl -eq 'https://tickets.rmxofficetools.com/api/public/printer-installs') 'install report URL is set'
+    $savedReport = $env:REMAX_NO_REPORT
+    $env:REMAX_NO_REPORT = '1'
+    Assert-Remax (Test-SkipInstallReport) 'REMAX_NO_REPORT=1 skips the install report'
+    if ($null -eq $savedReport) { Remove-Item Env:REMAX_NO_REPORT -ErrorAction SilentlyContinue } else { $env:REMAX_NO_REPORT = $savedReport }
+    $savedUser = $env:REMAX_PRINT_USER
+    $env:REMAX_PRINT_USER = "jo'hns"
+    $elevated = Get-ElevatedInstallCommand
+    Assert-Remax ($elevated.Contains("REMAX_PRINT_USER = 'jo''hns'")) 'elevated relaunch keeps REMAX_PRINT_USER'
+    Assert-Remax ($elevated.Contains($script:RawUrl)) 'elevated relaunch downloads the main script'
+    Assert-Remax ($elevated.Contains('irm ')) 'elevated relaunch uses irm | iex'
+    if ($null -eq $savedUser) { Remove-Item Env:REMAX_PRINT_USER -ErrorAction SilentlyContinue } else { $env:REMAX_PRINT_USER = $savedUser }
+    Assert-Remax ((Get-ReportTail -Text ('abcde') -MaxBytes 3) -eq 'cde') 'report log tail keeps the last bytes'
     $mixedName = [byte[]](84, 115, 105, 111, 103, 97, 115, 101, 0, 0)
     $mixedHits = @(Find-UserNameHits -Data $mixedName -Name 'tsiogase')
     Assert-Remax ($mixedHits.Count -ge 1 -and $mixedHits[0].Encoding -eq 'ASCII' -and [int]$mixedHits[0].Offset -eq 0) 'Tsiogase matches a lowercase probe'
@@ -7766,6 +7983,7 @@ try {
         Complete-RemaxProgress
         break
     }
+    Start-RemaxElevatedRelaunch | Out-Null
     switch ($script:Mode) {
         'help' { Show-Usage; Invoke-Complete 0 }
         'usage-error' {
@@ -7789,6 +8007,8 @@ try {
         Write-RemaxLine "ExitCode:    1"
         Write-RemaxLine ("FAIL  " + $message)
         Write-RemaxLine "======================================================"
+        $script:LastResult = 'FAIL'
+        $script:ReportText = "RESULT: FAIL`r`n" + $message
     }
     Invoke-Complete 1
 } finally {
