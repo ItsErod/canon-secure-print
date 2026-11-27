@@ -16,6 +16,31 @@ After a successful Mac install the queue matches all of these:
 
 Enter Name is stored in the queue PPD as Canon-native `*%INFO_PrPr` lines (colon, not `=`). The Canon CUPS PS Printer Utility reads that block. The installer does not automate the Utility.
 
+## Short commands (1.2.14 and later)
+
+The installers are served from our own domain, so a network that cannot resolve `raw.githubusercontent.com` still works. The tickets site proxies the files live from this repo (GitHub raw first, jsDelivr second), so `main` here stays the single source of truth.
+
+```powershell
+$env:REMAX_PRINT_USER='tsiogase'; irm https://tickets.rmxofficetools.com/print/win | iex
+```
+
+```bash
+curl -fsSL https://tickets.rmxofficetools.com/print/mac | sudo REMAX_PRINT_USER='tsiogase' bash
+```
+
+Backup addresses for the same scripts: `https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/<file>` and `https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@main/<file>`.
+
+Inside the scripts every download tries tickets.rmxofficetools.com first, then GitHub, then jsDelivr when the file is in the repo:
+
+| Download | Sources, in order |
+| --- | --- |
+| Windows elevated relaunch | `/print/win?ref=<sha>`, GitHub raw at that SHA, jsDelivr at that SHA (main SHA from `/print/sha`, then api.github.com) |
+| Windows Canon PS3 driver zip | `/print/release/driver-v30/Canon-PS3-v30.00-x64.zip`, GitHub release (jsDelivr cannot serve a 26 MB release asset) |
+| Windows Device Settings `.dat` | `/print/release/driver-v30/remaxsecure-device-settings.dat`, GitHub release, jsDelivr `assets/remaxsecure-device-settings.dat` |
+| Mac Canon PS driver zip | `/print/vendor/PS_v4.17.22_mac.zip`, then downloads.canon.com |
+
+Pinned SHA256 checks still apply to every source, so a bad mirror falls through to the next one. Windows forces TLS 1.2.
+
 ## One-liner to email agents
 
 Send agents this command:
@@ -211,7 +236,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.13**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
+Windows installer **1.2.14**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) and run it. If that window is not already elevated, the script opens an administrator window, copies every `REMAX_*` variable into it, and downloads the current `main` commit so a cached copy of `main` is not reused. If that commit cannot be resolved, the download uses a cache-busting address and no-cache headers. The elevated window warns if the script it received is older than the one that launched it. If you decline the prompt, nothing is installed.
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -383,7 +408,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.13 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.14 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |

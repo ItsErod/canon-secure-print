@@ -3,11 +3,14 @@
 # RE/MAX Escarpment IT. No .app, no GUI automation.
 #
 # Agents (admin password required):
-#   curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh | sudo bash
+#   curl -fsSL https://tickets.rmxofficetools.com/print/mac | sudo bash
 #
 # Preset the print username (sudo does not keep exported variables):
-#   curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh \
-#     | sudo REMAX_PRINT_USER='tsiogase' bash
+#   curl -fsSL https://tickets.rmxofficetools.com/print/mac | sudo REMAX_PRINT_USER='tsiogase' bash
+#
+# Backup addresses for the same script, if the tickets site is down:
+#   curl -fsSL https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh | sudo bash
+#   curl -fsSL https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@main/install-mac.sh | sudo bash
 #
 # Check the Canon encode / PPD patch logic without installing:
 #   bash install-mac.sh --self-test
@@ -29,10 +32,13 @@ fi
 set -u
 set -o pipefail
 
-VERSION="1.2.11"
+VERSION="1.2.14"
 INGEST_URL="https://tickets.rmxofficetools.com/api/public/printer-installs"
 INGEST_KEY_DEFAULT="7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e"
 RAW_INSTALL_URL="https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-mac.sh"
+INSTALL_URL="https://tickets.rmxofficetools.com/print/mac"
+CANON_PKG_URL_BUILTIN="https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip"
+CANON_PKG_MIRROR_URL="https://tickets.rmxofficetools.com/print/vendor/PS_v4.17.22_mac.zip"
 
 # Proprietary Canon PS driver. Not stored in this repo.
 # Export CANON_PKG_URL_DEFAULT (including an empty value) to replace this.
@@ -896,9 +902,9 @@ usage() {
   cat <<EOF
 Remax Secure Printer installer ${VERSION} (macOS, terminal only)
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo bash
+  curl -fsSL ${INSTALL_URL} | sudo bash
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
+  curl -fsSL ${INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
 
   sudo REMAX_PRINT_USER='tsiogase' bash install-mac.sh
   bash install-mac.sh --self-test
@@ -963,12 +969,12 @@ check_root() {
     cat <<EOF
 This installer must run as an administrator.
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo bash
+  curl -fsSL ${INSTALL_URL} | sudo bash
 
 To set the print username without a prompt (put the variable on sudo; sudo
 drops ordinary exported variables):
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
+  curl -fsSL ${INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
 EOF
     exit 1
   fi
@@ -1022,7 +1028,7 @@ prompt_print_user() {
       cat <<EOF
 No terminal is available to ask for the print username, and REMAX_PRINT_USER is unset.
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
+  curl -fsSL ${INSTALL_URL} | sudo REMAX_PRINT_USER='tsiogase' bash
 EOF
       exit 1
     fi
@@ -1145,7 +1151,7 @@ EOF
   fi
   cat <<EOF
 
-  curl -fsSL ${RAW_INSTALL_URL} | sudo \\
+  curl -fsSL ${INSTALL_URL} | sudo \\
     REMAX_CANON_PKG_URL='https://example.invalid/CanonPS.pkg' \\
     REMAX_PRINT_USER='${PRINT_USER}' bash
 EOF
@@ -1437,8 +1443,26 @@ install_driver_url() {
     say "curl is not available."
     return 1
   fi
-  if ! curl -fL --retry 3 --retry-delay 2 --connect-timeout 30 --max-time 300 -o "$dest" "$url" >>"$LOG" 2>&1; then
-    say "Download failed: ${url}. See ${LOG}"
+  # The built-in Canon zip is tried from tickets.rmxofficetools.com first,
+  # then from Canon. Any other URL is used as is.
+  local sources=("$url")
+  if [[ "$url" == "$CANON_PKG_URL_BUILTIN" ]]; then
+    sources=("$CANON_PKG_MIRROR_URL" "$url")
+  fi
+  local ok=0 n=0 src
+  for src in "${sources[@]}"; do
+    n=$((n + 1))
+    say "Download source ${n} of ${#sources[@]}: ${src}"
+    rm -f "$dest"
+    if curl -fL --retry 2 --retry-delay 2 --connect-timeout 30 --max-time 300 -o "$dest" "$src" >>"$LOG" 2>&1; then
+      say "Download OK from ${src}"
+      ok=1
+      break
+    fi
+    say "Download FAILED from ${src}"
+  done
+  if [[ "$ok" != "1" ]]; then
+    say "Download failed from every source. See ${LOG}"
     return 1
   fi
   kind="$(archive_kind "$url")"
