@@ -106,7 +106,10 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.4",
+        "1.2.5",
+        "REMAX_PS_OUTPUT",
+        "ComboFindExact",
+        "NotifySelChange",
         "REMAX_SKIP_CLEANUP",
         "REMAX_SKIP_FIREWALL",
         "Get-WritablePortPropertyNames",

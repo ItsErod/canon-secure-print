@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.4
+# Remax Secure Printer - Windows installer 1.2.5
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -66,7 +66,7 @@
 #   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
 #   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
 
-$script:Version = '1.2.4'
+$script:Version = '1.2.5'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -197,6 +197,8 @@ Environment (set them in the elevated PowerShell window):
                          before Device Settings automation.
   REMAX_SKIP_CLEANUP     Set to 1 to keep an existing queue, port, and driver.
   REMAX_SKIP_FIREWALL    Set to 1 to skip the firewall rule and AV note.
+  REMAX_PS_OUTPUT        Optional PS Output from Application value.
+                         Unset leaves that combo unchanged.
 
 Exit codes: 0 every line PASS, 2 queue installed and MANUAL lines remain, 1 failed.
 Exit code 1 and exit code 2 do not throw when the script is run with irm | iex.
@@ -2342,8 +2344,10 @@ function Select-ControlBelow {
 
 function Find-CanonDeviceTargets {
     param($Elements)
+    $paperCheck = Select-LabeledControl -Elements $Elements -Labels @('Cassette Feeding Unit') -ControlType 'CheckBox'
     $paper = Find-CanonComboByLabel -Elements $Elements -Labels @('Paper Source Options')
     $output = Find-CanonComboByLabel -Elements $Elements -Labels @('Output Options')
+    $psOutput = Find-CanonComboByLabel -Elements $Elements -Labels @('PS Output from Application')
     $user = Select-LabeledControl -Elements $Elements -Labels @('Set User Information') -ControlType 'CheckBox'
     $settings = $null
     if ($user) {
@@ -2351,12 +2355,38 @@ function Find-CanonDeviceTargets {
     }
     $profile = Find-CanonComboByLabel -Elements $Elements -Labels @('Config. Profile', 'Configuration Profile', 'Config Profile')
     return @{
+        PaperCheck   = $paperCheck
         PaperCombo   = $paper
         OutputCombo  = $output
+        PsOutput     = $psOutput
         UserInfo     = $user
         UserSettings = $settings
         Profile      = $profile
     }
+}
+
+function Get-PsOutputChoice {
+    if ([string]::IsNullOrWhiteSpace($env:REMAX_PS_OUTPUT)) { return '' }
+    return $env:REMAX_PS_OUTPUT.Trim()
+}
+
+function Find-ListedIndex {
+    param([string[]]$Labels, [string]$Want)
+    $index = 0
+    foreach ($label in @($Labels)) {
+        if (Test-CanonLabelEquals $label $Want) { return $index }
+        $index = $index + 1
+    }
+    return -1
+}
+
+function Resolve-ConfirmButtonLabel {
+    param([string[]]$Labels)
+    foreach ($want in @('Yes', 'OK')) {
+        $found = Resolve-CanonChoiceLabel -Labels $Labels -Accept @($want)
+        if ($found) { return $found }
+    }
+    return $null
 }
 
 function Find-CanonDefaultValueTargets {
@@ -2606,6 +2636,41 @@ public static class RemaxWin32 {
         SetCursorPos(x, y);
         mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
         mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+    }
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetParent(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern int GetDlgCtrlID(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+    public static int ComboFindExact(IntPtr combo, string text) {
+        return (int)SendMessageText(combo, 0x0158, new IntPtr(-1), text);
+    }
+    public static int ComboSetCurSel(IntPtr combo, int index) {
+        return (int)SendMessagePtr(combo, 0x014E, new IntPtr(index), IntPtr.Zero);
+    }
+    public static int ComboGetCurSel(IntPtr combo) {
+        return (int)SendMessagePtr(combo, 0x0147, IntPtr.Zero, IntPtr.Zero);
+    }
+    public static int ComboGetCount(IntPtr combo) {
+        return (int)SendMessagePtr(combo, 0x0146, IntPtr.Zero, IntPtr.Zero);
+    }
+    public static string ComboGetLbText(IntPtr combo, int index) {
+        StringBuilder sb = new StringBuilder(512);
+        SendMessageGetText(combo, 0x0148, new IntPtr(index), sb);
+        return sb.ToString();
+    }
+    public static void NotifySelChange(IntPtr combo) {
+        IntPtr parent = GetParent(combo);
+        int id = GetDlgCtrlID(combo);
+        int wparam = (id & 0xFFFF) | (1 << 16);
+        PostMessagePtr(parent, 0x0111, new IntPtr(wparam), combo);
+    }
+    public static void TapKey(byte vk) {
+        keybd_event(vk, 0, 0, UIntPtr.Zero);
+        keybd_event(vk, 0, 2, UIntPtr.Zero);
     }
 }
 '@
@@ -2884,6 +2949,25 @@ function Set-CanonCheck {
     if (-not $Snapshot) { return $false }
     $want = 'Off'
     if ($On) { $want = 'On' }
+    if ($Snapshot.Element) {
+        try {
+            $toggle = $null
+            if ($Snapshot.Element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$toggle)) {
+                $tries = 0
+                while ($tries -lt 3) {
+                    $state = [string]$toggle.Current.ToggleState
+                    if ($state -eq $want) { return $true }
+                    $toggle.Toggle()
+                    Start-Sleep -Milliseconds 200
+                    $tries = $tries + 1
+                }
+                $state = [string]$toggle.Current.ToggleState
+                if ($state -eq $want) { return $true }
+            }
+        } catch {
+            Write-Remax ("TogglePattern failed: " + $_.Exception.Message)
+        }
+    }
     $current = [string]$Snapshot.Toggle
     if (-not $current -and $Snapshot.Element) {
         try {
@@ -3190,6 +3274,9 @@ function Close-RemaxProperties {
                         Start-Sleep -Milliseconds 400
                     }
                 }
+                $keep = [IntPtr]::Zero
+                try { $keep = [IntPtr]$Session.Window.Current.NativeWindowHandle } catch { $keep = [IntPtr]::Zero }
+                try { [void](Dismiss-CanonPrompt -ProcessId $proc.Id -Keep $keep) } catch { }
                 [void](Click-DialogButton -Window $Session.Window -Labels @('Close', 'OK') -CloseHandle $Session.Handle)
             } else {
                 $clicked = Click-DialogButton -Window $Session.Window -Labels @('Cancel') -CloseHandle $Session.Handle
@@ -3314,6 +3401,95 @@ function Update-DefaultValueDialog {
     return $result
 }
 
+function Dismiss-CanonPrompt {
+    param([int]$ProcessId, [IntPtr]$Keep)
+    if ($ProcessId -le 0) { return $false }
+    $root = [System.Windows.Automation.AutomationElement]::RootElement
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+        $ProcessId
+    )
+    $windows = $null
+    try { $windows = $root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond) } catch { return $false }
+    foreach ($window in @($windows)) {
+        if (-not $window) { continue }
+        $handle = [IntPtr]::Zero
+        try { $handle = [IntPtr]$window.Current.NativeWindowHandle } catch { $handle = [IntPtr]::Zero }
+        if ($Keep -ne [IntPtr]::Zero -and $handle -eq $Keep) { continue }
+        $name = ''
+        try { $name = [string]$window.Current.Name } catch { $name = '' }
+        if ($name -like '*Properties*') { continue }
+        $elements = @()
+        try { $elements = Get-UiaDescendants $window } catch { $elements = @() }
+        $labels = @()
+        foreach ($el in @(Get-CanonElements $elements)) {
+            if ($el -and $el.ControlType -eq 'Button') { $labels += [string]$el.Name }
+        }
+        $pick = Resolve-ConfirmButtonLabel -Labels $labels
+        if (-not $pick) { continue }
+        $button = Select-LabeledControl -Elements $elements -Labels @($pick) -ControlType 'Button'
+        if (-not $button) { continue }
+        Write-Remax ("Confirmation '" + $name + "' clicking " + $pick)
+        Show-CanonWindow $window
+        [void](Invoke-CanonButton -Snapshot $button -How post)
+        Start-Sleep -Milliseconds 300
+        return $true
+    }
+    return $false
+}
+
+function Test-ComboTextMatches {
+    param([string]$Text, [string]$Want)
+    if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Want)) { return $false }
+    if (Test-CanonLabelEquals $Text $Want) { return $true }
+    $wantFinisher = Resolve-FinisherLabel -Labels @($Want)
+    $textFinisher = Resolve-FinisherLabel -Labels @($Text)
+    if ($wantFinisher -and $textFinisher) { return $true }
+    return $false
+}
+
+function Set-Win32ComboValue {
+    param($Snapshot, [string]$Want)
+    if (-not $Snapshot -or -not $Snapshot.Element) { return $false }
+    if (-not ('RemaxWin32' -as [type])) { return $false }
+    $hwnd = [IntPtr]::Zero
+    try { $hwnd = [IntPtr]$Snapshot.Element.Current.NativeWindowHandle } catch { $hwnd = [IntPtr]::Zero }
+    if ($hwnd -eq [IntPtr]::Zero) { return $false }
+    $index = [RemaxWin32]::ComboFindExact($hwnd, $Want)
+    if ($index -ge 0) {
+        [void][RemaxWin32]::ComboSetCurSel($hwnd, $index)
+        [RemaxWin32]::NotifySelChange($hwnd)
+        Start-Sleep -Milliseconds 250
+        $shown = [RemaxWin32]::ComboGetLbText($hwnd, $index)
+        if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
+        Write-Remax ("CB_SETCURSEL " + $index + " text '" + $shown + "'")
+        if (Test-ComboTextMatches $shown $Want) { return $true }
+        if (Test-CanonLabelEquals $shown $Want) { return $true }
+    }
+    Write-Remax "Combo list text was not exposed. Sending Home and Down until the value matches."
+    [void][RemaxWin32]::SetFocus($hwnd)
+    Start-Sleep -Milliseconds 150
+    [RemaxWin32]::TapKey(0x24)
+    Start-Sleep -Milliseconds 150
+    $step = 0
+    while ($step -lt 24) {
+        $cur = [RemaxWin32]::ComboGetCurSel($hwnd)
+        $shown = ''
+        if ($cur -ge 0) { $shown = [RemaxWin32]::ComboGetLbText($hwnd, $cur) }
+        if (-not $shown) { $shown = [RemaxWin32]::WindowText($hwnd) }
+        if (Test-ComboTextMatches $shown $Want) {
+            [RemaxWin32]::NotifySelChange($hwnd)
+            Write-Remax ("Key selection landed on '" + $shown + "'")
+            return $true
+        }
+        [RemaxWin32]::TapKey(0x28)
+        Start-Sleep -Milliseconds 120
+        $step = $step + 1
+    }
+    [RemaxWin32]::NotifySelChange($hwnd)
+    return $false
+}
+
 function Set-CanonComboToLabel {
     param($Combo, [string]$Kind)
     if (-not $Combo) { return $false }
@@ -3365,20 +3541,59 @@ function Set-CanonDeviceOnWindow {
             Write-Remax "Config. Profile list had no iR-ADV C5235/5240 entry."
         }
     }
-    if ($targets.PaperCombo) {
-        $ok = Set-CanonComboToLabel -Combo $targets.PaperCombo -Kind 'paper'
-        Write-Remax ("Paper Source Options set to Cassette Feeding Unit: " + $ok)
+    $keep = [IntPtr]::Zero
+    try { $keep = [IntPtr]$Window.Current.NativeWindowHandle } catch { $keep = [IntPtr]::Zero }
+    if ($targets.PaperCheck) {
+        $ok = Set-CanonCheck -Snapshot $targets.PaperCheck -On $true
+        Write-Remax ("Cassette Feeding Unit checkbox set On: " + $ok)
         Start-Sleep -Milliseconds 300
+        [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
+        $elements = Get-UiaDescendants $Window
+        $targets = Find-CanonDeviceTargets $elements
+    } elseif ($targets.PaperCombo) {
+        $ok = Set-CanonComboToLabel -Combo $targets.PaperCombo -Kind 'paper'
+        Write-Remax ("Paper Source Options combo set to Cassette Feeding Unit: " + $ok)
+        Start-Sleep -Milliseconds 300
+        [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
     } else {
-        Write-Remax "Paper Source Options combo was not found."
+        Write-Remax "Cassette Feeding Unit checkbox and Paper Source Options combo were not found."
     }
     if ($targets.OutputCombo) {
         $ok = Set-CanonComboToLabel -Combo $targets.OutputCombo -Kind 'output'
+        if (-not $ok) {
+            $ok = Set-Win32ComboValue -Snapshot $targets.OutputCombo -Want 'Inner Finisher E1'
+        }
         Write-Remax ("Output Options set to Inner Finisher E1: " + $ok)
+        Start-Sleep -Milliseconds 300
+        [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
+        $elements = Get-UiaDescendants $Window
+        $targets = Find-CanonDeviceTargets $elements
     } else {
         Write-Remax "Output Options combo was not found."
+    }
+    $psChoice = Get-PsOutputChoice
+    if ($psChoice -and $targets.PsOutput) {
+        Write-Remax ("REMAX_PS_OUTPUT is '" + $psChoice + "'.")
+        $opened = Get-CanonComboChoices $targets.PsOutput
+        $pick = Resolve-CanonChoiceLabel -Labels $opened.Labels -Accept @($psChoice)
+        if ($pick) {
+            [void](Select-ListedComboItem -Items $opened.Items -Label $pick -Combo $targets.PsOutput)
+        } else {
+            Collapse-CanonCombo $targets.PsOutput
+            [void](Set-Win32ComboValue -Snapshot $targets.PsOutput -Want $psChoice)
+        }
+    } else {
+        Write-Remax "PS Output from Application left unchanged."
+    }
+    $elements = Get-UiaDescendants $Window
+    $apply = Select-LabeledControl -Elements $elements -Labels @('Apply') -ControlType 'Button'
+    if ($apply -and $apply.Enabled) {
+        Write-Remax "Apply after Paper Source and Output Options."
+        [void](Invoke-CanonButton -Snapshot $apply -How post)
+        Start-Sleep -Milliseconds 400
+        [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
     }
     $elements = Get-UiaDescendants $Window
     $targets = Find-CanonDeviceTargets $elements
@@ -3413,9 +3628,23 @@ function Read-CanonDeviceFromWindow {
     try { $elements = Get-UiaDescendants $Window } catch { $elements = @() }
     Write-UiaSummary $elements
     $targets = Find-CanonDeviceTargets $elements
-    if ($targets.PaperCombo) {
+    if ($targets.PaperCheck) {
         $read.PaperSeen = $true
-        $read.PaperValue = Get-ComboDisplay $targets.PaperCombo
+        if ($targets.PaperCheck.Toggle -eq 'On') {
+            $read.PaperValue = 'Cassette Feeding Unit'
+        } else {
+            $read.PaperValue = 'Off'
+        }
+    }
+    if ($targets.PaperCombo) {
+        $comboValue = Get-ComboDisplay $targets.PaperCombo
+        if ($comboValue -and ($read.PaperValue -ne 'Cassette Feeding Unit')) {
+            $read.PaperSeen = $true
+            $read.PaperValue = $comboValue
+        } elseif (-not $read.PaperSeen) {
+            $read.PaperSeen = $true
+            $read.PaperValue = $comboValue
+        }
     }
     if ($targets.OutputCombo) {
         $read.OutputSeen = $true
@@ -3483,7 +3712,7 @@ function Convert-CanonReadToResult {
         if (-not $shown) { $shown = 'blank' }
         $result.PaperDetail = 'Device Settings readback: Paper Source Options is ' + $shown + '.'
     } else {
-        $result.PaperDetail = 'Device Settings dialog had no Paper Source Options combo.'
+        $result.PaperDetail = 'Device Settings had no Cassette Feeding Unit checkbox and no Paper Source Options combo.'
     }
     $outputOk = $false
     if ($Read.OutputValue) {
@@ -3702,11 +3931,11 @@ function Write-PrinterPropertyInventory {
         Write-Remax "Get-PrinterProperty returned no properties. UI Automation is the fallback for device options."
         return
     }
-    Write-Remax ("Get-PrinterProperty returned " + $count + " properties.")
+    Write-Remax ("Get-PrinterProperty inventory for " + $script:PrinterName + " (" + $count + " properties).")
     foreach ($row in @($Rows)) {
         $name = Get-PropertyRowName $row
         $value = Get-PropertyRowValue $row
-        if ($value.Length -gt 160) { $value = $value.Substring(0, 160) + '...' }
+        if ($value.Length -gt 800) { $value = $value.Substring(0, 800) + '...(len ' + $value.Length + ')' }
         Write-Remax ("PrinterProperty " + $name + " = " + $value)
     }
 }
@@ -5216,7 +5445,15 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.4') 'version string is 1.2.4'
+    Assert-Remax ($script:Version -eq '1.2.5') 'version string is 1.2.5'
+    Assert-Remax ((Get-PsOutputChoice) -eq '') 'PS Output from Application stays unchanged when REMAX_PS_OUTPUT is unset'
+    $savedPs = $env:REMAX_PS_OUTPUT
+    $env:REMAX_PS_OUTPUT = 'Auto'
+    Assert-Remax ((Get-PsOutputChoice) -eq 'Auto') 'REMAX_PS_OUTPUT selects the PS Output value'
+    if ($null -eq $savedPs) { Remove-Item Env:REMAX_PS_OUTPUT -ErrorAction SilentlyContinue } else { $env:REMAX_PS_OUTPUT = $savedPs }
+    Assert-Remax ((Find-ListedIndex -Labels @('None', 'Inner Finisher E1') -Want 'Inner Finisher E1') -eq 1) 'Inner Finisher E1 is the second combo item'
+    Assert-Remax ((Resolve-ConfirmButtonLabel -Labels @('Cancel', 'Yes')) -eq 'Yes') 'a confirmation dialog uses Yes'
+    Assert-Remax ((Resolve-ConfirmButtonLabel -Labels @('Help', 'OK')) -eq 'OK') 'a confirmation dialog uses OK'
     $writable = @(Get-WritablePortPropertyNames)
     $sawHost = $false
     foreach ($propName in $writable) { if ($propName -eq 'HostAddress') { $sawHost = $true } }
@@ -5436,6 +5673,22 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ($targets.UserInfo -and (Test-CanonLabelEquals $targets.UserInfo.Name 'Set User Information')) 'Set User Information checkbox found'
     Assert-Remax ($targets.UserSettings -and ($targets.UserSettings.Top -eq 188)) 'Settings... is the button beside Set User Information'
     Assert-Remax ($null -eq $targets.Profile) 'recorded page has no config profile combo'
+    $boxes = New-Object System.Collections.Generic.List[object]
+    [void]$boxes.Add((New-FakeEl 'Paper Source Options:' 'Text' 30 40 180 18 '' ''))
+    [void]$boxes.Add((New-FakeEl 'Cassette Feeding Unit' 'CheckBox' 40 70 200 18 '' 'Off'))
+    [void]$boxes.Add((New-FakeEl 'Paper Deck Unit' 'CheckBox' 40 96 180 18 '' 'Off'))
+    [void]$boxes.Add((New-FakeEl 'Envelope Feeder Attachment' 'CheckBox' 40 122 220 18 '' 'Off'))
+    [void]$boxes.Add((New-FakeEl 'Output Options:' 'Text' 30 160 140 18 '' ''))
+    [void]$boxes.Add((New-FakeEl '' 'ComboBox' 420 158 220 22 'None' ''))
+    [void]$boxes.Add((New-FakeEl 'Copy Tray' 'CheckBox' 40 190 140 18 '' 'Off'))
+    [void]$boxes.Add((New-FakeEl 'Inner Finisher Additional Tray' 'CheckBox' 40 216 220 18 '' 'Off'))
+    [void]$boxes.Add((New-FakeEl 'PS Output from Application:' 'Text' 30 260 200 18 '' ''))
+    [void]$boxes.Add((New-FakeEl '' 'ComboBox' 420 258 220 22 'Auto' ''))
+    $boxTargets = Find-CanonDeviceTargets $boxes
+    Assert-Remax ($boxTargets.PaperCheck -and (Test-CanonLabelEquals $boxTargets.PaperCheck.Name 'Cassette Feeding Unit')) 'paper source is the Cassette Feeding Unit checkbox'
+    Assert-Remax ($null -eq $boxTargets.PaperCombo) 'checkbox layout has no paper source combo'
+    Assert-Remax ($boxTargets.OutputCombo -and ($boxTargets.OutputCombo.Top -eq 158)) 'output combo stays on the Output Options row'
+    Assert-Remax ($boxTargets.PsOutput -and ($boxTargets.PsOutput.Top -eq 258)) 'PS Output combo is found but not changed by default'
     $dialog = New-Object System.Collections.Generic.List[object]
     [void]$dialog.Add((New-FakeEl 'Name to Set for User Information:' 'Text' 20 20 280 18 '' ''))
     [void]$dialog.Add((New-FakeEl 'Logon Name' 'RadioButton' 30 50 160 18 '' 'Off'))

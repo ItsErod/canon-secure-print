@@ -211,7 +211,7 @@ Any older `*%INFO_PrPr` block that uses `=` is removed. That form is not what th
 
 ## Windows
 
-Windows installer **1.2.4**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
+Windows installer **1.2.5**. It follows the recorded Windows 11 setup: Canon PS3 driver 30.00, a Standard TCP/IP port named after the printer host, queue `RemaxSecure` (not shared, not the default), 1-sided printing, and the Device Settings below. Open **Windows PowerShell** (the 64-bit one) with **Run as administrator** and run:
 
 ```powershell
 irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
@@ -264,10 +264,12 @@ After the port exists, the script reads Security Center antivirus and firewall p
 | Reachable | `Test-NetConnection` to port 515. Informational. Does not change the exit code. |
 | Printer | `RemaxSecure`, not shared, not the default. |
 | 1-sided | `Set-PrintConfiguration -DuplexingMode OneSided` (1-sided Printing), including again after Device Settings. |
-| Cassette Feeding Unit | **Paper Source Options** = **Cassette Feeding Unit** (the recorded combo, which used to be None). |
+| Cassette Feeding Unit | Checkbox **Cassette Feeding Unit** under **Paper Source Options** (this driver's layout). A combo of the same name is also accepted. |
 | Inner Finisher E1 | **Output Options** = **Inner Finisher E1**. |
 | Set User Information | Checkbox **Set User Information** on. **Get Device Information** is left alone. |
 | User Name | **Settings...** on that row opens **Default Value Settings**. Under **Name to Set for User Information:**, the **User Name** radio (not **Logon Name**) and the text box under it. **Always Confirm User Information When Performing Secured Print** stays checked. **Confirm User Name When Printing** stays unchecked. PIN stays blank. |
+
+On this Canon PS3 driver, **Paper Source Options** is a group of checkboxes. The installer checks **Cassette Feeding Unit**. **Output Options** is a combo that starts at None. The script selects **Inner Finisher E1** from the list, and if the list is owner-drawn it uses `CB_FINDSTRINGEXACT` / `CB_SETCURSEL` plus a selection-change notice, then Home and Down until the value reads Inner Finisher E1. A confirmation dialog is answered with Yes or OK. Apply is clicked, then Printer properties is closed and opened again for readback. Every `Get-PrinterProperty` name and value is written to the log. `REMAX_PS_OUTPUT` sets **PS Output from Application** when you supply a value. When it is unset, that combo is left alone.
 
 `RESULT: PASS` and exit code 0 mean every line passed. `RESULT: PARTIAL` and exit code 2 mean the queue is installed and a `MANUAL` line could not be verified. `RESULT: FAIL` and exit code 1 mean the queue, port, or driver did not install, or `-Verify` read a Device Settings value that is wrong. When the script is run with `irm | iex`, exit code 1 and exit code 2 do not throw. The report is printed, `LASTEXITCODE` is set, and the window stays open.
 
@@ -371,7 +373,7 @@ bash tests/simulate-install.sh
 | `install-mac.sh` | Installer Mac agents run |
 | `verify-mac.sh` | Read-only check for a Mac |
 | `lib/canon_ppd.pl` | Encoder and PPD patcher (also embedded in the two Mac scripts) |
-| `install-windows.ps1` | Windows installer 1.2.4 (`-Verify`, `-SelfTest`) |
+| `install-windows.ps1` | Windows installer 1.2.5 (`-Verify`, `-SelfTest`) |
 | `verify-windows.ps1` | Read-only Windows check (calls `install-windows.ps1 -Verify`) |
 | `tests/simulate-install.sh` | Fake-CUPS test of the Mac install and verify flow |
 | `tests/check-windows-installer.py` | Static check of the Windows script and README one-liners |
