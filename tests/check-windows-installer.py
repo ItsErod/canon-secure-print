@@ -106,7 +106,7 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.14",
+        "1.2.15",
         "application/vnd.github.sha",
         "Cache-Control",
         "REMAX_INGEST_KEY",
