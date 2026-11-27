@@ -24,6 +24,9 @@ if ! grep -F 'https://downloads.canon.com/sss2025/drivers/PS_v4.17.22_mac.zip' i
   exit 1
 fi
 
+# Never post a simulated install to the live tickets site.
+export REMAX_NO_REPORT=1
+
 work="$(mktemp -d "${TMPDIR:-/tmp}/remax-sim.XXXXXX")"
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
@@ -137,7 +140,7 @@ assert_installed
 grep -q 'Enter Name should show tsiogase' "$work/stdout.txt"
 [[ -f "$support/last-install.txt" ]]
 grep -q '^result=PASS$' "$support/last-install.txt"
-grep -q 'installer 1.1.0' "$work/stdout.txt"
+grep -q 'installer 1.2.14' "$work/stdout.txt"
 grep -q 'driver is already installed' "$work/install.log"
 if grep -q 'Downloading Canon driver package' "$work/install.log"; then
   echo "downloaded a driver even though the PPD was already available" >&2
@@ -149,7 +152,7 @@ export REMAX_LOG="$work/install-stdin.log"
 cat "$isolated/install-mac.sh" | bash >"$work/stdout.txt"
 assert_report "$work/stdout.txt"
 assert_installed
-grep -q 'installer 1.1.0' "$work/stdout.txt"
+grep -q 'installer 1.2.14' "$work/stdout.txt"
 
 echo "=== verify ==="
 export REMAX_LOG="$work/verify.log"

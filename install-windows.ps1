@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.13
+# Remax Secure Printer - Windows installer 1.2.14
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -8,17 +8,26 @@
 # To skip the prompt:
 #
 #   $env:REMAX_PRINT_USER = 'tsiogase'
-#   irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
+#   irm https://tickets.rmxofficetools.com/print/win | iex
 #
 # Agent one-liner (prompts for the print username, not the Windows logon):
 #
+#   irm https://tickets.rmxofficetools.com/print/win | iex
+#
+# Backup addresses for the same script, if the tickets site is down:
+#
 #   irm https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 | iex
+#   irm https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@main/install-windows.ps1 | iex
+#
+# Every download inside the script (driver zip, Device Settings file, the
+# elevated relaunch) tries tickets.rmxofficetools.com first, then GitHub,
+# then jsDelivr where the file is in the repo.
 #
 # Same window, file form:
 #
 #   Set-ExecutionPolicy -Scope Process Bypass
 #   $s = Join-Path $env:TEMP 'remax-install-windows.ps1'
-#   Invoke-RestMethod https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1 -OutFile $s
+#   Invoke-RestMethod https://tickets.rmxofficetools.com/print/win -OutFile $s
 #   & $s
 #
 # Read-only check (opens Printer properties, reads Device Settings, clicks Cancel):
@@ -69,7 +78,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.13'
+$script:Version = '1.2.14'
 $script:IngestUrl = 'https://tickets.rmxofficetools.com/api/public/printer-installs'
 $script:IngestKey = '7ff1e139019beaf03fbacc4dfcd4c3c78b87cb6fb991923e'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
@@ -81,6 +90,16 @@ $script:DeviceDatBytes = 44692
 $script:ExportedPrintUser = 'tsiogase'
 $script:CanonInfLeaf = 'CNS30UA64.INF'
 $script:RawUrl = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1'
+$script:ShortUrl = 'https://tickets.rmxofficetools.com/print/win'
+$script:MirrorBase = 'https://tickets.rmxofficetools.com/print'
+$script:RawBase = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print'
+$script:JsDelivrBase = 'https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print'
+$script:ReleaseBase = 'https://github.com/ItsErod/canon-secure-print/releases/download'
+$script:DeviceDatRepoPath = 'assets/remaxsecure-device-settings.dat'
+# Install report limits. The tickets site takes at most 512 KB per report,
+# report_text up to 20000 characters, and single-line fields without control characters.
+$script:ReportMaxPayloadBytes = 450000
+$script:ReportTextMaxChars = 19000
 $script:PrinterName = 'RemaxSecure'
 $script:StaleName = 'RemaxSecure_COLOUR'
 $script:DefaultHost = '172.16.105.21'
@@ -98,6 +117,10 @@ $script:Completing = $false
 $script:RanAsFile = -not [string]::IsNullOrEmpty($PSCommandPath)
 $script:PreviousErrorAction = $ErrorActionPreference
 $ErrorActionPreference = 'Stop'
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+}
 
 $script:Mode = 'install'
 $script:UserArg = ''
@@ -191,10 +214,10 @@ function Show-Usage {
     Write-RemaxLine @"
 Remax Secure Printer installer $script:Version (Windows)
 
-  irm $script:RawUrl | iex
+  irm $script:ShortUrl | iex
 
   `$env:REMAX_PRINT_USER = 'tsiogase'
-  irm $script:RawUrl | iex
+  irm $script:ShortUrl | iex
 
   powershell -NoProfile -ExecutionPolicy Bypass -File install-windows.ps1 -Verify
   powershell -NoProfile -ExecutionPolicy Bypass -File install-windows.ps1 -SelfTest
@@ -697,12 +720,13 @@ function Get-ScriptVersionFromText {
     return ''
 }
 
-function Get-MainCommitSha {
+function Read-RemaxShaFrom {
+    param([string]$Url, [string]$Accept)
     $sha = ''
     try {
-        $request = [System.Net.HttpWebRequest]::Create('https://api.github.com/repos/ItsErod/canon-secure-print/commits/main')
+        $request = [System.Net.HttpWebRequest]::Create($Url)
         $request.Method = 'GET'
-        $request.Accept = 'application/vnd.github.sha'
+        if ($Accept) { $request.Accept = $Accept }
         $request.UserAgent = 'RemaxSecurePrinter'
         $request.Timeout = 10000
         $request.Headers.Add('Cache-Control', 'no-cache')
@@ -714,9 +738,18 @@ function Get-MainCommitSha {
             $response.Close()
         }
     } catch {
+        Write-Remax ("Could not read the main commit from " + $Url + ": " + $_.Exception.Message)
         return ''
     }
     if ($sha -match '^[0-9a-fA-F]{40}$') { return $sha.ToLowerInvariant() }
+    return ''
+}
+
+function Get-MainCommitSha {
+    $sha = Read-RemaxShaFrom -Url ($script:MirrorBase + '/sha') -Accept 'text/plain'
+    if ($sha) { return $sha }
+    $sha = Read-RemaxShaFrom -Url 'https://api.github.com/repos/ItsErod/canon-secure-print/commits/main' -Accept 'application/vnd.github.sha'
+    if ($sha) { return $sha }
     return ''
 }
 
@@ -729,24 +762,70 @@ function Get-ElevatedScriptUrl {
     return $script:RawUrl + '?nocache=' + $nonce
 }
 
+function Get-ElevatedScriptUrls {
+    param([string]$CommitSha)
+    $urls = New-Object System.Collections.Generic.List[string]
+    if ($CommitSha -match '^[0-9a-fA-F]{40}$') {
+        $ref = $CommitSha.ToLowerInvariant()
+        [void]$urls.Add($script:ShortUrl + '?ref=' + $ref)
+        [void]$urls.Add((Get-ElevatedScriptUrl -CommitSha $ref))
+        [void]$urls.Add($script:JsDelivrBase + '@' + $ref + '/install-windows.ps1')
+    } else {
+        $nonce = [guid]::NewGuid().ToString('n')
+        [void]$urls.Add($script:ShortUrl + '?nocache=' + $nonce)
+        [void]$urls.Add((Get-ElevatedScriptUrl -CommitSha ''))
+        [void]$urls.Add($script:JsDelivrBase + '@main/install-windows.ps1')
+    }
+    return $urls.ToArray()
+}
+
 function Get-ElevatedDownloadScript {
-    param([string]$ScriptUrl, [string]$LaunchVersion)
-    $safeUrl = ([string]$ScriptUrl).Replace("'", "''")
+    param([string[]]$ScriptUrl, [string]$LaunchVersion)
+    $quoted = New-Object System.Collections.Generic.List[string]
+    foreach ($one in @($ScriptUrl)) {
+        if ([string]::IsNullOrWhiteSpace($one)) { continue }
+        [void]$quoted.Add("'" + ([string]$one).Replace("'", "''") + "'")
+    }
+    $safeUrls = $quoted -join ', '
     $safeVer = ([string]$LaunchVersion).Replace("'", "''")
     $body = @'
 $launchVersion = '__VER__'
-$url = '__URL__'
-$req = [System.Net.HttpWebRequest]::Create($url)
-$req.Method = 'GET'
-$req.UserAgent = 'RemaxSecurePrinter'
-$req.Timeout = 60000
-$req.Headers.Add('Cache-Control', 'no-cache')
-$req.Headers.Add('Pragma', 'no-cache')
-$resp = $req.GetResponse()
-$reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
-$text = $reader.ReadToEnd()
-$reader.Close()
-$resp.Close()
+$urls = @(__URLS__)
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+}
+$text = ''
+$n = 0
+foreach ($url in $urls) {
+    $n++
+    Write-Host ('Downloading installer, source ' + $n + ' of ' + $urls.Count + ': ' + $url)
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($url)
+        $req.Method = 'GET'
+        $req.UserAgent = 'RemaxSecurePrinter'
+        $req.Timeout = 60000
+        $req.Headers.Add('Cache-Control', 'no-cache')
+        $req.Headers.Add('Pragma', 'no-cache')
+        $resp = $req.GetResponse()
+        $reader = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $candidate = $reader.ReadToEnd()
+        $reader.Close()
+        $resp.Close()
+        if ($candidate -match '\$script:Version\s*=') {
+            $text = $candidate
+            Write-Host ('Installer downloaded from ' + $url)
+            break
+        }
+        Write-Host ('Source ' + $n + ' did not return the installer script. Trying the next source.')
+    } catch {
+        Write-Host ('Source ' + $n + ' failed: ' + $_.Exception.Message)
+    }
+}
+if (-not $text) {
+    Write-Host 'Could not download the installer from tickets.rmxofficetools.com, GitHub, or jsDelivr. Check the internet connection and run the command again.'
+    return
+}
 $got = ''
 if ($text -match '\$script:Version\s*=\s*''([^'']+)''') { $got = $Matches[1] }
 $older = $false
@@ -769,12 +848,12 @@ if ($older) {
 }
 Invoke-Expression $text
 '@
-    return $body.Replace('__VER__', $safeVer).Replace('__URL__', $safeUrl)
+    return $body.Replace('__VER__', $safeVer).Replace('__URLS__', $safeUrls)
 }
 
 function Get-ElevatedInstallCommand {
-    param([string]$ScriptUrl)
-    if ([string]::IsNullOrWhiteSpace($ScriptUrl)) { $ScriptUrl = Get-ElevatedScriptUrl -CommitSha '' }
+    param([string[]]$ScriptUrl)
+    if (@($ScriptUrl | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -eq 0) { $ScriptUrl = Get-ElevatedScriptUrls -CommitSha '' }
     $lines = New-Object System.Collections.Generic.List[string]
     foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'REMAX_*' })) {
         if ($item.Name -eq 'REMAX_LAUNCH_VERSION') { continue }
@@ -802,7 +881,7 @@ function Start-RemaxElevatedRelaunch {
     if ($script:Mode -eq 'selftest' -or $script:Mode -eq 'help' -or $script:Mode -eq 'usage-error') { return $false }
     if (Test-RemaxAdmin) { return $false }
     $sha = Get-MainCommitSha
-    $url = Get-ElevatedScriptUrl -CommitSha $sha
+    $url = Get-ElevatedScriptUrls -CommitSha $sha
     if ($sha) {
         Write-RemaxLine ("Elevated install will download main at " + $sha)
     } else {
@@ -901,38 +980,62 @@ function Send-RemaxInstallReport {
         Write-RemaxLine 'REPORTED:     SKIP  REMAX_NO_REPORT=1'
         return
     }
-    $key = $script:IngestKey
-    if (-not [string]::IsNullOrWhiteSpace($env:REMAX_INGEST_KEY)) { $key = $env:REMAX_INGEST_KEY.Trim() }
+    $key = [string]$script:IngestKey
+    if (-not [string]::IsNullOrWhiteSpace($env:REMAX_INGEST_KEY)) { $key = ([string]$env:REMAX_INGEST_KEY).Trim() }
     $result = [string]$script:LastResult
     if (-not $result) {
         if ($ExitCode -eq 0) { $result = 'PASS' }
         elseif ($ExitCode -eq 2) { $result = 'PARTIAL' }
         else { $result = 'FAIL' }
     }
-    $steps = @{}
+    try {
+    $steps = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     foreach ($label in @(Get-StatusLabels)) {
         $state = 'not checked'
         if ($script:LastStatus -and $script:LastStatus.ContainsKey($label)) {
-            $state = [string]$script:LastStatus[$label].State
+            $state = [string]($script:LastStatus[$label].State)
         }
-        $steps[$label] = $state
+        $steps[[string]$label] = [string]$state
     }
     $adapter = Get-PrimaryAdapter
     $osUser = ''
-    try { $osUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name } catch { $osUser = [string]$env:USERNAME }
+    try { $osUser = [string]([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) } catch { $osUser = [string]$env:USERNAME }
+    $network = 'OTHER'
+    try { $network = [string](Get-RemaxReportNetwork) } catch { $network = 'OTHER' }
+    $osCaption = ''
+    try { $osCaption = [string](Get-RemaxOsCaption) } catch { $osCaption = '' }
     $logText = ''
     if ($script:LogFile -and (Test-Path -LiteralPath $script:LogFile)) {
-        try { $logText = [System.IO.File]::ReadAllText($script:LogFile) } catch { $logText = '' }
+        try { $logText = [string]([System.IO.File]::ReadAllText($script:LogFile)) } catch { $logText = '' }
     }
-    try {
-    $logText = Get-ReportTail -Text $logText -MaxBytes 409600
-    $reportBody = Get-InstallReportText
+    $reportBody = [string](Get-InstallReportText)
     Write-Remax ("Install report text length " + $reportBody.Length)
-    $posted = Invoke-InstallReportAttempt -Key $key -Result $result -Steps $steps -OsUser $osUser -Adapter $adapter -ReportBody $reportBody -LogText $logText
-    if ($posted.Status -eq 413) {
-        Write-Remax "Install report was too large. Retrying with a shorter log."
-        $shortLog = Get-ReportTail -Text $logText -MaxBytes 32768
-        $posted = Invoke-InstallReportAttempt -Key $key -Result $result -Steps $steps -OsUser $osUser -Adapter $adapter -ReportBody $reportBody -LogText $shortLog
+    $fields = @{
+        PrintUser = [string]$script:LastPrintUser
+        Computer  = [string]$env:COMPUTERNAME
+        Os        = $osCaption
+        Result    = $result
+        OsUser    = $osUser
+        Ip        = [string]$adapter.Ip
+        Mac       = [string]$adapter.Mac
+        Network   = $network
+        Version   = [string]$script:Version
+    }
+    $plan = @(
+        @{ Flat = $false; LogBytes = 204800 },
+        @{ Flat = $true; LogBytes = 32768 },
+        @{ Flat = $true; LogBytes = 0 }
+    )
+    $posted = $null
+    $n = 0
+    foreach ($step in $plan) {
+        $n++
+        if ($n -gt 1) {
+            Write-Remax ("Install report was rejected (HTTP " + $posted.Status + "). Retry " + ($n - 1) + " with a one-line report and a log tail of " + $step.LogBytes + " bytes.")
+        }
+        $body = New-InstallReportBody -Fields $fields -Steps $steps -ReportText $reportBody -LogText $logText -LogBytes ([int]$step.LogBytes) -FlatReport:([bool]$step.Flat)
+        $posted = Invoke-InstallReportAttempt -Key $key -Body $body
+        if ($posted.Status -ne 400 -and $posted.Status -ne 413) { break }
     }
     if ($posted.Status -eq 201) {
         Write-RemaxLine 'REPORTED:     PASS'
@@ -952,18 +1055,112 @@ function Get-InstallReportText {
     return [string]$script:ReportText
 }
 
+function Get-ReportField {
+    param($Value, [int]$Max, [string]$Default = '')
+    $text = ''
+    if ($null -ne $Value) { $text = [string]$Value }
+    $text = [regex]::Replace($text, '[\x00-\x1f\x7f]', ' ').Trim()
+    if ($text.Length -gt $Max) { $text = $text.Substring(0, $Max).Trim() }
+    if (-not $text) { $text = $Default }
+    return [string]$text
+}
+
+function Get-FlatReportText {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $flat = [regex]::Replace($Text, '\r\n|\r|\n', ' | ')
+    $flat = [regex]::Replace($flat, '[\x00-\x1f\x7f]', ' ')
+    return [string]$flat.Trim()
+}
+
+function New-InstallReportBody {
+    param($Fields, $Steps, [string]$ReportText, [string]$LogText, [int]$LogBytes, [switch]$FlatReport)
+    $report = [string]$ReportText
+    if ($null -eq $ReportText) { $report = '' }
+    if ($FlatReport) {
+        $report = Get-FlatReportText $report
+    } else {
+        $report = [regex]::Replace($report, '[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ')
+    }
+    if ($report.Length -gt $script:ReportTextMaxChars) { $report = $report.Substring(0, $script:ReportTextMaxChars) }
+    $stepMap = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+    if ($Steps) {
+        $count = 0
+        foreach ($label in @($Steps.Keys)) {
+            $count++
+            if ($count -gt 40) { break }
+            $name = Get-ReportField -Value $label -Max 80
+            if (-not $name) { continue }
+            $stepMap[$name] = (Get-ReportField -Value $Steps[$label] -Max 200 -Default 'not checked')
+        }
+    }
+    $log = ''
+    if ($LogBytes -gt 0) { $log = [string](Get-ReportTail -Text ([string]$LogText) -MaxBytes $LogBytes) }
+    $body = New-Object System.Collections.Specialized.OrderedDictionary
+    $body['print_username'] = Get-ReportField -Value $Fields.PrintUser -Max 80 -Default 'unknown'
+    $body['computer_name'] = Get-ReportField -Value $Fields.Computer -Max 128 -Default 'unknown'
+    $body['os'] = Get-ReportField -Value $Fields.Os -Max 80 -Default 'Windows'
+    $body['overall_result'] = Get-ReportField -Value $Fields.Result -Max 10 -Default 'FAIL'
+    $body['steps'] = $stepMap
+    $body['os_user'] = Get-ReportField -Value $Fields.OsUser -Max 128
+    $body['ip_address'] = Get-ReportField -Value $Fields.Ip -Max 64
+    $body['mac_address'] = Get-ReportField -Value $Fields.Mac -Max 64
+    $body['network'] = Get-ReportField -Value $Fields.Network -Max 10 -Default 'OTHER'
+    $body['script_version'] = Get-ReportField -Value $Fields.Version -Max 40
+    $body['report_text'] = [string]$report
+    $body['log_text'] = [string]$log
+    return $body
+}
+
+function ConvertTo-RemaxJsonString {
+    param($Value)
+    $text = ''
+    if ($null -ne $Value) { $text = [string]$Value }
+    $text = $text.Replace('\', '\\').Replace('"', '\"')
+    $evaluator = [System.Text.RegularExpressions.MatchEvaluator] {
+        param($m)
+        return ('\u' + ([int][char]$m.Value).ToString('x4'))
+    }
+    $text = [regex]::Replace($text, '[\x00-\x1f\x7f-\uffff]', $evaluator)
+    return ('"' + $text + '"')
+}
+
+# Primitives only. Every value is written as a JSON string, and a nested
+# dictionary (steps) as an object of strings. No serializer walks a PSObject,
+# so there is no circular reference error and no runaway fallback output.
 function ConvertTo-InstallReportJson {
     param($Body)
-    try {
-        Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
-        $serializer.MaxJsonLength = 16777216
-        $serializer.RecursionLimit = 8
-        return $serializer.Serialize($Body)
-    } catch {
-        Write-Remax ("Install report JSON serializer failed: " + $_.Exception.Message)
-        return ($Body | ConvertTo-Json -Depth 8 -Compress)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($key in @($Body.Keys)) {
+        $value = $Body[$key]
+        if ($value -is [System.Collections.IDictionary]) {
+            $inner = New-Object System.Collections.Generic.List[string]
+            foreach ($innerKey in @($value.Keys)) {
+                [void]$inner.Add((ConvertTo-RemaxJsonString ([string]$innerKey)) + ':' + (ConvertTo-RemaxJsonString ([string]$value[$innerKey])))
+            }
+            $json = '{' + ($inner -join ',') + '}'
+        } else {
+            $json = ConvertTo-RemaxJsonString ([string]$value)
+        }
+        [void]$parts.Add((ConvertTo-RemaxJsonString ([string]$key)) + ':' + $json)
     }
+    return ('{' + ($parts -join ',') + '}')
+}
+
+function Get-InstallReportPayload {
+    param($Body)
+    $json = ConvertTo-InstallReportJson $Body
+    $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+    $logBytes = 0
+    if ($Body['log_text']) { $logBytes = [System.Text.Encoding]::UTF8.GetByteCount([string]$Body['log_text']) }
+    while ($payload.Length -gt $script:ReportMaxPayloadBytes -and $logBytes -gt 0) {
+        $logBytes = [int]($logBytes / 2)
+        if ($logBytes -lt 1024) { $logBytes = 0 }
+        $Body['log_text'] = [string](Get-ReportTail -Text ([string]$Body['log_text']) -MaxBytes $logBytes)
+        $json = ConvertTo-InstallReportJson $Body
+        $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+    }
+    return ,$payload
 }
 
 function Read-WebResponseBody {
@@ -983,42 +1180,36 @@ function Read-WebResponseBody {
     }
 }
 
+function Get-WebExceptionResponse {
+    param($ErrorRecord)
+    $ex = $null
+    try { $ex = $ErrorRecord.Exception } catch { $ex = $null }
+    $depth = 0
+    while ($ex -and $depth -lt 6) {
+        if ($ex -is [System.Net.WebException]) {
+            try { return $ex.Response } catch { return $null }
+        }
+        $ex = $ex.InnerException
+        $depth++
+    }
+    return $null
+}
+
 function Invoke-InstallReportAttempt {
-    param($Key, [string]$Result, $Steps, [string]$OsUser, $Adapter, [string]$ReportBody, [string]$LogText)
+    param($Key, $Body)
     $attempt = @{ Status = 0; Body = ''; Error = '' }
     try {
         try { [System.Net.ServicePointManager]::Expect100Continue = $false } catch { }
-        try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 } catch { }
-        $network = 'OTHER'
-        try { $network = Get-RemaxReportNetwork } catch { $network = 'OTHER' }
-        $stepMap = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-        if ($Steps) {
-            foreach ($label in @($Steps.Keys)) {
-                $stepMap[[string]$label] = [string]$Steps[$label]
-            }
-        }
-        $body = New-Object 'System.Collections.Generic.Dictionary[string,object]'
-        $body['print_username'] = [string]$script:LastPrintUser
-        $body['computer_name'] = [string]$env:COMPUTERNAME
-        $body['os'] = [string](Get-RemaxOsCaption)
-        $body['overall_result'] = [string]$Result
-        $body['steps'] = $stepMap
-        $body['os_user'] = [string]$OsUser
-        $body['ip_address'] = [string]$adapter.Ip
-        $body['mac_address'] = [string]$adapter.Mac
-        $body['network'] = [string]$network
-        $body['script_version'] = [string]$script:Version
-        $body['report_text'] = [string]$ReportBody
-        $body['log_text'] = [string]$LogText
-        $json = ConvertTo-InstallReportJson $body
-        $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
+        try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12 } catch { }
+        $payload = Get-InstallReportPayload $Body
         Write-Remax ("Install report POST " + $script:IngestUrl)
-        Write-Remax ("Install report payload bytes " + $payload.Length)
+        Write-Remax ("Install report payload bytes " + $payload.Length + " (report_text " + ([string]$Body['report_text']).Length + " chars, log_text " + ([string]$Body['log_text']).Length + " chars)")
         $request = [System.Net.HttpWebRequest]::Create($script:IngestUrl)
         $request.Method = 'POST'
         $request.ContentType = 'application/json; charset=utf-8'
-        $request.Timeout = 10000
-        $request.ReadWriteTimeout = 10000
+        $request.UserAgent = 'RemaxSecurePrinter'
+        $request.Timeout = 20000
+        $request.ReadWriteTimeout = 20000
         $request.Headers.Add('Authorization', 'Bearer ' + $Key)
         $request.ContentLength = $payload.Length
         $stream = $request.GetRequestStream()
@@ -1031,12 +1222,14 @@ function Invoke-InstallReportAttempt {
             } finally { $response.Close() }
         } catch {
             $attempt.Error = $_.Exception.Message
-            $resp = $null
-            try { $resp = $_.Exception.Response } catch { $resp = $null }
+            $resp = Get-WebExceptionResponse $_
             if ($resp) {
                 try { $attempt.Status = [int]$resp.StatusCode } catch { }
                 $attempt.Body = Read-WebResponseBody $resp
                 try { $resp.Close() } catch { }
+            }
+            if ($attempt.Status -eq 0 -and $attempt.Error -match '\((\d{3})\)') {
+                $attempt.Status = [int]$Matches[1]
             }
         }
     } catch {
@@ -1058,7 +1251,7 @@ is not visible after User Account Control elevates:
   Set-ExecutionPolicy -Scope Process Bypass
   `$env:REMAX_PRINT_USER = 'tsiogase'
   `$s = Join-Path `$env:TEMP 'remax-install-windows.ps1'
-  Invoke-RestMethod $script:RawUrl -OutFile `$s
+  Invoke-RestMethod $script:ShortUrl -OutFile `$s
   & `$s
 "@
 }
@@ -1126,7 +1319,7 @@ Format is last name + first initial, lowercase, for example tsiogase.
 The Windows logon name is not used. Set it in the elevated window:
 
   `$env:REMAX_PRINT_USER = 'tsiogase'
-  irm $script:RawUrl | iex
+  irm $script:ShortUrl | iex
 "@
     }
     return $user
@@ -1506,19 +1699,75 @@ function Expand-RemaxZip {
     Expand-Archive -LiteralPath $named -DestinationPath $Destination -Force
 }
 
+function Get-RemaxDownloadSources {
+    param([string]$Url)
+    $list = New-Object System.Collections.Generic.List[object]
+    $releasePrefix = $script:ReleaseBase + '/'
+    $rawPrefix = $script:RawBase + '/'
+    if ($Url.StartsWith($releasePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $tail = $Url.Substring($releasePrefix.Length)
+        [void]$list.Add(@{ Name = 'tickets.rmxofficetools.com'; Url = ($script:MirrorBase + '/release/' + $tail) })
+        [void]$list.Add(@{ Name = 'GitHub'; Url = $Url })
+        if ($Url -eq $script:DeviceDatUrl) {
+            [void]$list.Add(@{ Name = 'jsDelivr'; Url = ($script:JsDelivrBase + '@main/' + $script:DeviceDatRepoPath) })
+        }
+    } elseif ($Url.StartsWith($rawPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $tail = $Url.Substring($rawPrefix.Length)
+        $cut = $tail.IndexOf('?')
+        if ($cut -ge 0) { $tail = $tail.Substring(0, $cut) }
+        $slash = $tail.IndexOf('/')
+        if ($slash -gt 0) {
+            $ref = $tail.Substring(0, $slash)
+            $path = $tail.Substring($slash + 1)
+            [void]$list.Add(@{ Name = 'tickets.rmxofficetools.com'; Url = ($script:MirrorBase + '/files/' + $path + '?ref=' + $ref) })
+            [void]$list.Add(@{ Name = 'GitHub'; Url = $Url })
+            [void]$list.Add(@{ Name = 'jsDelivr'; Url = ($script:JsDelivrBase + '@' + $ref + '/' + $path) })
+        } else {
+            [void]$list.Add(@{ Name = 'GitHub'; Url = $Url })
+        }
+    } else {
+        [void]$list.Add(@{ Name = 'custom URL'; Url = $Url })
+    }
+    return $list.ToArray()
+}
+
 function Save-RemaxDownload {
-    param([string]$Url, [string]$Destination)
+    param([string]$Url, [string]$Destination, [string]$Sha256 = '', [long]$Bytes = 0)
     try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch {
     }
+    $sources = @(Get-RemaxDownloadSources -Url $Url)
+    $failures = New-Object System.Collections.Generic.List[string]
     $previousProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 5
+        $n = 0
+        foreach ($source in $sources) {
+            $n++
+            Write-Remax ("Download source " + $n + " of " + $sources.Count + " (" + $source.Name + "): " + $source.Url)
+            try {
+                if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+                Invoke-WebRequest -Uri $source.Url -OutFile $Destination -UseBasicParsing -MaximumRedirection 5
+                if ($Sha256) {
+                    $gotLength = [long](Get-Item -LiteralPath $Destination).Length
+                    $gotHash = (Get-FileSha256 $Destination).Trim().ToLowerInvariant()
+                    if (($Bytes -gt 0 -and $gotLength -ne $Bytes) -or $gotHash -ne $Sha256.Trim().ToLowerInvariant()) {
+                        throw ("file did not match the pinned SHA256 (size " + $gotLength + ", SHA256 " + $gotHash + ")")
+                    }
+                }
+                Write-Remax ("Download OK from " + $source.Name)
+                return
+            } catch {
+                $message = $_.Exception.Message
+                Write-Remax ("Download FAILED from " + $source.Name + ": " + $message)
+                [void]$failures.Add($source.Name + ": " + $message)
+            }
+        }
     } finally {
         $ProgressPreference = $previousProgress
     }
+    throw ("Every download source failed. " + ($failures -join ' | '))
 }
 
 function ConvertTo-ExitCode {
@@ -1837,7 +2086,11 @@ function Install-CanonPackageFromUrl {
         $download = Join-Path $work (Get-DownloadFileName -Kind $urlKind)
         Write-Remax ("Downloading Canon driver package from " + $Url)
         Write-Remax ("Saving the download as " + (Split-Path -Leaf $download))
-        Save-RemaxDownload -Url $Url -Destination $download
+        if ($Url -eq $script:CanonPkgUrl) {
+            Save-RemaxDownload -Url $Url -Destination $download -Sha256 $script:CanonPkgSha256 -Bytes ([long]$script:CanonPkgBytes)
+        } else {
+            Save-RemaxDownload -Url $Url -Destination $download
+        }
         $length = (Get-Item -LiteralPath $download).Length
         if ($length -gt 250MB) {
             throw "Downloaded file is larger than 250 MB. Refusing to continue."
@@ -1987,7 +2240,7 @@ added with pnputil.
 
   `$env:REMAX_CANON_PKG_URL = 'https://your-host.example/Canon-PS3-v30.zip'
   `$env:REMAX_PRINT_USER = 'tsiogase'
-  irm $script:RawUrl | iex
+  irm $script:ShortUrl | iex
 "@
 }
 
@@ -5539,7 +5792,11 @@ function Get-DeviceDatFile {
     $dest = Join-Path $destDir 'remaxsecure-device-settings.dat'
     Write-Remax ("Downloading Device Settings " + $request.Location)
     try {
-        Save-RemaxDownload -Url $request.Location -Destination $dest
+        if ($request.Pinned) {
+            Save-RemaxDownload -Url $request.Location -Destination $dest -Sha256 $script:DeviceDatSha256 -Bytes ([long]$script:DeviceDatBytes)
+        } else {
+            Save-RemaxDownload -Url $request.Location -Destination $dest
+        }
     } catch {
         return @{ Ok = $false; Detail = ("Device Settings download failed: " + $_.Exception.Message) }
     }
@@ -7856,7 +8113,7 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.13') 'version string is 1.2.13'
+    Assert-Remax ($script:Version -eq '1.2.14') 'version string is 1.2.14'
     Assert-Remax (-not (Test-AlwaysConfirmWanted)) 'Always Confirm User Information stays unchecked'
     $alwaysText = ''
     if ($PSCommandPath -and (Test-Path -LiteralPath $PSCommandPath)) {
@@ -7882,6 +8139,21 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ($shaUrl -eq 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/0123456789abcdef0123456789abcdef01234567/install-windows.ps1') 'a resolved main SHA is used in the raw URL'
     $bustUrl = Get-ElevatedScriptUrl -CommitSha ''
     Assert-Remax ($bustUrl.StartsWith($script:RawUrl + '?nocache=')) 'a failed SHA lookup uses a cache buster'
+    $shaUrls = @(Get-ElevatedScriptUrls -CommitSha '0123456789abcdef0123456789abcdef01234567')
+    Assert-Remax ($shaUrls.Count -eq 3) 'the elevated relaunch has three sources'
+    Assert-Remax ($shaUrls[0] -eq 'https://tickets.rmxofficetools.com/print/win?ref=0123456789abcdef0123456789abcdef01234567') 'tickets.rmxofficetools.com is tried first for the elevated relaunch'
+    Assert-Remax ($shaUrls[1] -eq $shaUrl) 'GitHub raw is the second elevated source'
+    Assert-Remax ($shaUrls[2] -eq 'https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@0123456789abcdef0123456789abcdef01234567/install-windows.ps1') 'jsDelivr is the third elevated source'
+    $mainUrls = @(Get-ElevatedScriptUrls -CommitSha '')
+    Assert-Remax ($mainUrls[0].StartsWith($script:ShortUrl + '?nocache=') -and $mainUrls[2] -eq ($script:JsDelivrBase + '@main/install-windows.ps1')) 'an unresolved SHA uses main on every source'
+    $pkgSources = @(Get-RemaxDownloadSources -Url $script:CanonPkgUrl)
+    Assert-Remax ($pkgSources.Count -eq 2 -and $pkgSources[0].Url -eq 'https://tickets.rmxofficetools.com/print/release/driver-v30/Canon-PS3-v30.00-x64.zip' -and $pkgSources[1].Url -eq $script:CanonPkgUrl) 'driver zip tries tickets.rmxofficetools.com, then GitHub'
+    $datSources = @(Get-RemaxDownloadSources -Url $script:DeviceDatUrl)
+    Assert-Remax ($datSources.Count -eq 3 -and $datSources[0].Url -eq 'https://tickets.rmxofficetools.com/print/release/driver-v30/remaxsecure-device-settings.dat' -and $datSources[2].Url -eq 'https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@main/assets/remaxsecure-device-settings.dat') 'Device Settings tries tickets.rmxofficetools.com, GitHub, then jsDelivr'
+    $rawSources = @(Get-RemaxDownloadSources -Url ($script:RawUrl + '?nocache=x'))
+    Assert-Remax ($rawSources.Count -eq 3 -and $rawSources[0].Url -eq 'https://tickets.rmxofficetools.com/print/files/install-windows.ps1?ref=main' -and $rawSources[2].Url -eq 'https://cdn.jsdelivr.net/gh/ItsErod/canon-secure-print@main/install-windows.ps1') 'repo files try tickets.rmxofficetools.com, GitHub raw, then jsDelivr'
+    $customSources = @(Get-RemaxDownloadSources -Url 'https://example.invalid/custom.zip')
+    Assert-Remax ($customSources.Count -eq 1 -and $customSources[0].Url -eq 'https://example.invalid/custom.zip') 'a custom URL is used as is'
     Assert-Remax (-not [string]::IsNullOrWhiteSpace($script:IngestKey)) 'install report key is set'
     Assert-Remax ($script:IngestUrl -eq 'https://tickets.rmxofficetools.com/api/public/printer-installs') 'install report URL is set'
     $savedReport = $env:REMAX_NO_REPORT
@@ -7894,9 +8166,44 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ($elevated.Contains("REMAX_PRINT_USER = 'jo''hns'")) 'elevated relaunch keeps REMAX_PRINT_USER'
     Assert-Remax ($elevated.Contains('Cache-Control')) 'elevated download sends no-cache headers'
     Assert-Remax ($elevated.Contains('nocache=')) 'elevated download without a SHA uses a cache buster'
+    Assert-Remax ($elevated.Contains("'https://tickets.rmxofficetools.com/print/win?nocache=")) 'elevated download tries tickets.rmxofficetools.com'
+    Assert-Remax ($elevated.Contains('Tls12')) 'elevated download forces TLS 1.2'
     Assert-Remax ($elevated.Contains("REMAX_LAUNCH_VERSION = '" + $script:Version + "'")) 'elevated relaunch records the launcher version'
     if ($null -eq $savedUser) { Remove-Item Env:REMAX_PRINT_USER -ErrorAction SilentlyContinue } else { $env:REMAX_PRINT_USER = $savedUser }
     Assert-Remax ((Get-ReportTail -Text ('abcde') -MaxBytes 3) -eq 'cde') 'report log tail keeps the last bytes'
+    $rtFields = @{
+        PrintUser = [psobject]'hoffmannl'
+        Computer  = [psobject]"LAPTOP`t1"
+        Os        = (New-Object psobject -Property @{ Name = 'Windows 11 Pro 24H2' })
+        Result    = 'PASS'
+        OsUser    = 'RMX\lhoffmann'
+        Ip        = (Get-Item Env:PATH).Value.Substring(0, 3)
+        Mac       = $null
+        Network   = 'REMAX'
+        Version   = $script:Version
+    }
+    $rtSteps = @{ 'DRIVER' = [psobject]'PASS'; 'USER NAME' = (Get-Process -Id $PID) }
+    $rtReport = "RESULT: PASS`r`nUSER NAME: hoffmannl`n" + [string][char]0x00e9 + ' "quoted" \ back'
+    $rtLog = ('x' * 600000) + "`nlast line"
+    $rtBody = New-InstallReportBody -Fields $rtFields -Steps $rtSteps -ReportText $rtReport -LogText $rtLog -LogBytes 204800
+    $rtJson = ''
+    $rtError = ''
+    try { $rtJson = ConvertTo-InstallReportJson $rtBody } catch { $rtError = $_.Exception.Message }
+    Assert-Remax ($rtError -eq '' -and $rtJson.StartsWith('{"print_username":"hoffmannl"')) 'install report serializes PSObject values without a circular reference'
+    $rtParsed = $null
+    try { $rtParsed = $rtJson | ConvertFrom-Json } catch { $rtParsed = $null }
+    Assert-Remax ($null -ne $rtParsed -and $rtParsed.report_text -eq $rtReport) 'install report JSON parses and keeps report_text exactly'
+    Assert-Remax ($null -ne $rtParsed -and $rtParsed.computer_name -eq 'LAPTOP 1' -and $rtParsed.steps.DRIVER -eq 'PASS' -and $rtParsed.mac_address -eq '') 'install report fields are single-line strings'
+    Assert-Remax ($null -ne $rtParsed -and $rtParsed.log_text.EndsWith('last line') -and $rtParsed.log_text.Length -le 204800) 'install report log is a capped tail'
+    $rtPayload = Get-InstallReportPayload $rtBody
+    Assert-Remax ($rtPayload.Length -le $script:ReportMaxPayloadBytes) 'install report payload stays under the server limit'
+    $rtBig = New-InstallReportBody -Fields $rtFields -Steps $rtSteps -ReportText $rtReport -LogText (([string][char]0x00e9) * 300000) -LogBytes 409600
+    $rtBigPayload = Get-InstallReportPayload $rtBig
+    Assert-Remax ($rtBigPayload.Length -le $script:ReportMaxPayloadBytes -and ([string]$rtBig['report_text']) -eq $rtReport) 'an oversized log is trimmed and report_text is kept'
+    $rtFlat = New-InstallReportBody -Fields $rtFields -Steps $rtSteps -ReportText $rtReport -LogText $rtLog -LogBytes 0 -FlatReport
+    Assert-Remax (-not ([string]$rtFlat['report_text']).Contains("`n") -and ([string]$rtFlat['report_text']).Contains('RESULT: PASS | USER NAME: hoffmannl') -and ([string]$rtFlat['log_text']) -eq '') 'the retry report is one line with no log'
+    $rtEmpty = New-InstallReportBody -Fields @{} -Steps $null -ReportText $null -LogText $null -LogBytes 1000
+    Assert-Remax ($rtEmpty['print_username'] -eq 'unknown' -and $rtEmpty['os'] -eq 'Windows' -and $rtEmpty['overall_result'] -eq 'FAIL') 'install report fills required fields'
     $mixedName = [byte[]](84, 115, 105, 111, 103, 97, 115, 101, 0, 0)
     $mixedHits = @(Find-UserNameHits -Data $mixedName -Name 'tsiogase')
     Assert-Remax ($mixedHits.Count -ge 1 -and $mixedHits[0].Encoding -eq 'ASCII' -and [int]$mixedHits[0].Offset -eq 0) 'Tsiogase matches a lowercase probe'
