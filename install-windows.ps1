@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.7
+# Remax Secure Printer - Windows installer 1.2.8
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -69,7 +69,7 @@
 #   or the readback shows them unset. The print username is applied after
 #   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.7'
+$script:Version = '1.2.8'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
@@ -1698,6 +1698,7 @@ function Get-PortSnapshot {
     $protocol = 0
     $portNumber = 0
     $byteCount = $false
+    $byteKnown = $false
     $snmp = $false
     $snmpKnown = $false
     if ($port) {
@@ -1705,41 +1706,61 @@ function Get-PortSnapshot {
         $queue = [string]$port.Queue
         $protocol = [int]$port.Protocol
         $portNumber = [int]$port.PortNumber
-        $byteCount = [bool]$port.ByteCount
-        if ($port.PSObject.Properties.Name -contains 'SNMPEnabled') {
-            $snmp = [bool]$port.SNMPEnabled
+        if ($port.PSObject.Properties.Name -contains 'ByteCount' -and $null -ne $port.ByteCount) {
+            $byteCount = (ConvertTo-FlagEnabled $port.ByteCount)
+            $byteKnown = $true
+        }
+        if ($port.PSObject.Properties.Name -contains 'SNMPEnabled' -and $null -ne $port.SNMPEnabled) {
+            $snmp = (ConvertTo-FlagEnabled $port.SNMPEnabled)
             $snmpKnown = $true
         }
     }
     if ($cmdlet) {
         if (-not $hostName -and $cmdlet.PrinterHostAddress) { $hostName = [string]$cmdlet.PrinterHostAddress }
-        if ($cmdlet.PSObject.Properties.Name -contains 'SNMPEnabled') {
-            $snmp = [bool]$cmdlet.SNMPEnabled
+        if ($cmdlet.PSObject.Properties.Name -contains 'SNMPEnabled' -and $null -ne $cmdlet.SNMPEnabled) {
+            $snmp = (ConvertTo-FlagEnabled $cmdlet.SNMPEnabled)
             $snmpKnown = $true
         }
     }
     if ($registry) {
         if ($null -ne $registry.Queue -and $registry.Queue -ne '') { $queue = [string]$registry.Queue }
         if ($null -ne $registry.Protocol) { $protocol = [int]$registry.Protocol }
-        if ($null -ne $registry.ByteCount) { $byteCount = ([int]$registry.ByteCount -ne 0) }
+        if ($null -ne $registry.ByteCount) {
+            $byteCount = ([int]$registry.ByteCount -ne 0)
+            $byteKnown = $true
+        }
         if ($null -ne $registry.Snmp) {
             $snmp = ([int]$registry.Snmp -ne 0)
             $snmpKnown = $true
         }
     }
     return @{
-        Name        = $Name
-        Host        = $hostName
-        Queue       = $queue
-        Protocol    = $protocol
-        PortNumber  = $portNumber
-        ByteCount   = $byteCount
-        SnmpEnabled = $snmp
-        SnmpKnown   = $snmpKnown
-        Cim         = $port
-        Registry    = $registry
-        Cmdlet      = $cmdlet
+        Name            = $Name
+        Host            = $hostName
+        Queue           = $queue
+        Protocol        = $protocol
+        PortNumber      = $portNumber
+        ByteCount       = $byteCount
+        ByteCountKnown  = $byteKnown
+        SnmpEnabled     = $snmp
+        SnmpKnown       = $snmpKnown
+        Cim             = $port
+        Registry        = $registry
+        Cmdlet          = $cmdlet
     }
+}
+
+function ConvertTo-FlagEnabled {
+    param($Value)
+    if ($null -eq $Value) { return $false }
+    if ($Value -is [bool]) { return [bool]$Value }
+    $text = ([string]$Value).Trim()
+    $lower = $text.ToLowerInvariant()
+    if ($lower -eq '' -or $lower -eq '0' -or $lower -eq 'false' -or $lower -eq 'off' -or $lower -eq 'no') { return $false }
+    if ($lower -eq '1' -or $lower -eq 'true' -or $lower -eq 'on' -or $lower -eq 'yes') { return $true }
+    $parsed = 0
+    if ([int]::TryParse($text, [ref]$parsed)) { return ($parsed -ne 0) }
+    return $false
 }
 
 function Test-PortMatches {
@@ -1749,13 +1770,18 @@ function Test-PortMatches {
     if ($Snapshot.Host -ne $Target.Host) { return $false }
     if ($Snapshot.Queue -ne $Target.Queue) { return $false }
     if ([int]$Snapshot.Protocol -ne 2) { return $false }
-    if ($Snapshot.PortNumber -and [int]$Snapshot.PortNumber -ne 515) { return $false }
-    if ([bool]$Snapshot.ByteCount -ne [bool]$Target.ByteCount) { return $false }
-    if (-not $Snapshot.SnmpKnown) { return $false }
-    if ([bool]$Snapshot.SnmpEnabled) { return $false }
+    if ($Snapshot.PortNumber -and [int]$Snapshot.PortNumber -ne 0 -and [int]$Snapshot.PortNumber -ne 515) { return $false }
+    if ($Snapshot.ByteCountKnown -and ((ConvertTo-FlagEnabled $Snapshot.ByteCount) -ne [bool]$Target.ByteCount)) { return $false }
+    if ($Snapshot.SnmpKnown -and (ConvertTo-FlagEnabled $Snapshot.SnmpEnabled)) { return $false }
     if ($Snapshot.Registry) {
-        $regOk = Test-RecordedPortValues -Protocol $Snapshot.Registry.Protocol -Queue $Snapshot.Registry.Queue -ByteCount $Snapshot.Registry.ByteCount -Snmp $Snapshot.Registry.Snmp -ExpectedQueue $Target.Queue -ExpectByte ([bool]$Target.ByteCount)
-        if (-not $regOk) { return $false }
+        if ($null -ne $Snapshot.Registry.Protocol -and [int]$Snapshot.Registry.Protocol -ne 2) { return $false }
+        if ($null -ne $Snapshot.Registry.Queue -and [string]$Snapshot.Registry.Queue -ne '' -and [string]$Snapshot.Registry.Queue -ne [string]$Target.Queue) { return $false }
+        if ($null -ne $Snapshot.Registry.ByteCount) {
+            $wantByte = 0
+            if ($Target.ByteCount) { $wantByte = 1 }
+            if ([int]$Snapshot.Registry.ByteCount -ne $wantByte) { return $false }
+        }
+        if ($null -ne $Snapshot.Registry.Snmp -and [int]$Snapshot.Registry.Snmp -ne 0) { return $false }
     }
     return $true
 }
@@ -2601,9 +2627,152 @@ function Get-DeviceUiSkipReason {
     return ''
 }
 
+function Get-RemaxUiReferencePaths {
+    foreach ($name in @('UIAutomationClient', 'UIAutomationTypes', 'WindowsBase')) {
+        try { Add-Type -AssemblyName $name -ErrorAction Stop } catch { }
+    }
+    $paths = New-Object System.Collections.Generic.List[string]
+    foreach ($typeName in @('System.Windows.Automation.AutomationElement', 'System.Windows.Automation.AutomationPattern', 'System.Windows.Point')) {
+        $type = $typeName -as [type]
+        if (-not $type) { continue }
+        $location = ''
+        try { $location = [string]$type.Assembly.Location } catch { $location = '' }
+        if ($location -and -not $paths.Contains($location)) { [void]$paths.Add($location) }
+    }
+    return @($paths.ToArray())
+}
+
+function Get-RemaxUiaSource {
+    return @'
+using System;
+public static class RemaxUia {
+    public static string LastError = "";
+    public static void BeginInvoke(System.Windows.Automation.AutomationElement element) {
+        LastError = "";
+        System.Threading.Thread thread = new System.Threading.Thread(
+            delegate () {
+                try {
+                    object pattern;
+                    bool found = element.TryGetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern, out pattern);
+                    if (found) {
+                        System.Windows.Automation.InvokePattern invoke = (System.Windows.Automation.InvokePattern)pattern;
+                        invoke.Invoke();
+                    } else {
+                        LastError = "no invoke pattern";
+                    }
+                } catch (System.Exception ex) {
+                    LastError = ex.Message;
+                }
+            }
+        );
+        thread.SetApartmentState(System.Threading.ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+    }
+}
+'@
+}
+
+function Test-RemaxUiaHelperCompile {
+    $result = @{ Ran = $false; Ok = $false; Detail = '' }
+    $client = $false
+    $types = $false
+    try { Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop; $client = $true } catch { $client = $false }
+    try { Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop; $types = $true } catch { $types = $false }
+    if (-not $client -or -not $types) {
+        $result.Ok = $true
+        $result.Detail = 'UIAutomation assemblies are not on this host. The helper source was not compiled.'
+        return $result
+    }
+    $result.Ran = $true
+    if ('RemaxUia' -as [type]) {
+        $result.Ok = $true
+        $result.Detail = 'RemaxUia is already compiled.'
+        return $result
+    }
+    $refs = @(Get-RemaxUiReferencePaths)
+    if ($refs.Count -lt 2) {
+        $result.Detail = 'UIAutomationClient and UIAutomationTypes were loaded but their paths were not found.'
+        return $result
+    }
+    try {
+        Add-Type -TypeDefinition (Get-RemaxUiaSource) -ReferencedAssemblies $refs -Language CSharp -ErrorAction Stop
+        $result.Ok = ($null -ne ('RemaxUia' -as [type]))
+        if (-not $result.Ok) { $result.Detail = 'Add-Type finished without defining RemaxUia.' }
+        else { $result.Detail = 'RemaxUia compiled with UIAutomationClient and UIAutomationTypes.' }
+    } catch {
+        $result.Detail = $_.Exception.Message
+    }
+    return $result
+}
+
+function Test-CalledHelpersDefined {
+    $path = $PSCommandPath
+    if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
+        return @{ Ok = $true; Detail = 'script path is not available under irm | iex' }
+    }
+    $lines = @(Get-Content -LiteralPath $path)
+    $defs = @{}
+    foreach ($line in $lines) {
+        if ($line -match 'function ([A-Za-z][A-Za-z0-9-]*)') {
+            $defs[$Matches[1]] = $true
+        }
+    }
+    $known = @{}
+    foreach ($cmd in @(Get-Command -CommandType Cmdlet, Alias -ErrorAction SilentlyContinue)) {
+        $known[[string]$cmd.Name] = $true
+    }
+    foreach ($cmd in @(
+        'Get-Printer', 'Get-PrinterDriver', 'Get-PrinterPort', 'Get-PrinterProperty', 'Get-PrintConfiguration',
+        'Add-Printer', 'Add-PrinterDriver', 'Add-PrinterPort', 'Set-Printer', 'Set-PrinterProperty', 'Set-PrintConfiguration',
+        'Remove-Printer', 'Remove-PrinterDriver', 'Remove-PrinterPort',
+        'Get-Service', 'Start-Service', 'Restart-Service', 'Get-CimInstance', 'Set-CimInstance', 'Invoke-CimMethod',
+        'Get-WindowsDriver', 'Expand-Archive',
+        'Get-NetFirewallProfile', 'Get-NetFirewallRule', 'New-NetFirewallRule', 'Remove-NetFirewallRule',
+        'Get-NetConnectionProfile', 'Test-NetConnection'
+    )) {
+        $known[$cmd] = $true
+    }
+    $missing = New-Object System.Collections.Generic.List[string]
+    $seen = @{}
+    $pattern = '\b((?:Get|Set|Add|Remove|New|Test|Invoke|Write|Read|Show|Select|Find|Resolve|Format|Convert|Update|Start|Stop|Wait|Open|Close|Enter|Exit|Copy|Move|Import|Export|Expand|Save|Ensure|Apply|Protect|Complete|Suspend|Resume|Dismiss|Restart)-[A-Za-z][A-Za-z0-9-]*)\b'
+    foreach ($line in $lines) {
+        $trim = $line.Trim()
+        if ($trim.StartsWith('#')) { continue }
+        foreach ($match in @([regex]::Matches($line, $pattern))) {
+            $name = [string]$match.Groups[1].Value
+            if ($defs.ContainsKey($name)) { continue }
+            if ($known.ContainsKey($name)) { continue }
+            if (-not $seen.ContainsKey($name)) {
+                [void]$missing.Add($name)
+                $seen[$name] = $true
+            }
+        }
+    }
+    if (-not $defs.ContainsKey('Select-UiaTab')) {
+        return @{ Ok = $false; Detail = 'Select-UiaTab is not defined' }
+    }
+    $tabDef = 0
+    $tabUse = 0
+    $lineNo = 0
+    foreach ($line in $lines) {
+        $lineNo = $lineNo + 1
+        if ($tabDef -eq 0 -and $line -match '^function Select-UiaTab\b') { $tabDef = $lineNo }
+        if ($tabUse -eq 0 -and $line -match 'Select-UiaTab\s+-') { $tabUse = $lineNo }
+    }
+    if ($tabDef -eq 0 -or ($tabUse -gt 0 -and $tabDef -gt $tabUse)) {
+        return @{ Ok = $false; Detail = 'Select-UiaTab must be defined at script scope before it is used' }
+    }
+    if ($missing.Count -gt 0) {
+        return @{ Ok = $false; Detail = ('missing helpers: ' + ($missing -join ', ')) }
+    }
+    return @{ Ok = $true; Detail = 'called helpers are defined' }
+}
+
 function Initialize-RemaxUi {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
+    try { Add-Type -AssemblyName WindowsBase -ErrorAction Stop } catch { }
     if (-not ('RemaxWin32' -as [type])) {
         $win32 = @'
 using System;
@@ -2651,8 +2820,16 @@ public static class RemaxWin32 {
     public static extern IntPtr GetParent(IntPtr hWnd);
     [DllImport("user32.dll")]
     public static extern int GetDlgCtrlID(IntPtr hWnd);
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", SetLastError = true)]
     public static extern bool BlockInput(bool fBlockIt);
+    public static bool TryBlockInput(bool block, out int error) {
+        error = 0;
+        bool ok = BlockInput(block);
+        if (!ok) {
+            error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        }
+        return ok;
+    }
     [DllImport("user32.dll")]
     public static extern IntPtr SetFocus(IntPtr hWnd);
     [DllImport("user32.dll")]
@@ -2689,35 +2866,8 @@ public static class RemaxWin32 {
         Add-Type -TypeDefinition $win32 -Language CSharp
     }
     if (-not ('RemaxUia' -as [type])) {
-        $uia = @'
-using System;
-public static class RemaxUia {
-    public static string LastError = "";
-    public static void BeginInvoke(System.Windows.Automation.AutomationElement element) {
-        LastError = "";
-        System.Threading.Thread thread = new System.Threading.Thread(
-            delegate () {
-                try {
-                    object pattern;
-                    bool found = element.TryGetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern, out pattern);
-                    if (found) {
-                        System.Windows.Automation.InvokePattern invoke = (System.Windows.Automation.InvokePattern)pattern;
-                        invoke.Invoke();
-                    } else {
-                        LastError = "no invoke pattern";
-                    }
-                } catch (System.Exception ex) {
-                    LastError = ex.Message;
-                }
-            }
-        );
-        thread.SetApartmentState(System.Threading.ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Start();
-    }
-}
-'@
-        $refs = @([System.Windows.Automation.AutomationElement].Assembly.Location)
+        $uia = Get-RemaxUiaSource
+        $refs = @(Get-RemaxUiReferencePaths)
         try {
             Add-Type -TypeDefinition $uia -ReferencedAssemblies $refs -Language CSharp
         } catch {
@@ -3461,10 +3611,74 @@ function Get-UserNameRegistryRoots {
     )
 }
 
+function Get-UserNameProbeTargets {
+    $computer = ''
+    try { $computer = [string][Environment]::MachineName } catch { $computer = '' }
+    if ([string]::IsNullOrWhiteSpace($computer)) { $computer = [string]$env:COMPUTERNAME }
+    $printerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\' + $script:PrinterName
+    $perUser = 'HKCU:\Printers\DevModePerUser'
+    $targets = @(
+        @{ Path = $printerKey; Value = 'Default DevMode' }
+        @{ Path = $perUser; Value = $script:PrinterName }
+    )
+    if (-not [string]::IsNullOrWhiteSpace($computer)) {
+        $targets += @{ Path = $perUser; Value = ('\\' + $computer + '\' + $script:PrinterName) }
+    }
+    return $targets
+}
+
+function Write-UserNameProbe {
+    param([string]$OldName)
+    foreach ($target in @(Get-UserNameProbeTargets)) {
+        $where = $target.Path + ' value ' + $target.Value
+        if (-not (Test-Path -LiteralPath $target.Path)) {
+            Write-Remax ("User name probe not present: " + $where)
+            continue
+        }
+        $item = $null
+        try { $item = Get-Item -LiteralPath $target.Path } catch { $item = $null }
+        $names = @()
+        if ($item) {
+            try { $names = @($item.GetValueNames()) } catch { $names = @() }
+        }
+        $found = $false
+        foreach ($name in @($names)) {
+            if ([string]$name -eq [string]$target.Value) { $found = $true }
+        }
+        if (-not $found) {
+            Write-Remax ("User name probe not present: " + $where)
+            continue
+        }
+        $raw = $null
+        try { $raw = $item.GetValue($target.Value) } catch { $raw = $null }
+        $bytes = $raw -as [byte[]]
+        $asciiHits = 0
+        $utfHits = 0
+        $length = 0
+        if ($null -ne $bytes) {
+            $length = $bytes.Length
+            if ($OldName) {
+                foreach ($pat in @(Get-UserNameBytePatterns $OldName)) {
+                    $count = @(Find-UserNameOffsets -Data $bytes -Needle $pat.Bytes).Count
+                    if ($pat.Encoding -eq 'ASCII') { $asciiHits = $count }
+                    if ($pat.Encoding -eq 'UTF-16') { $utfHits = $count }
+                }
+            }
+        } elseif ($raw -is [string]) {
+            $length = ([string]$raw).Length
+            if ($OldName -and ([string]$raw).Contains($OldName)) { $asciiHits = 1 }
+        }
+        Write-Remax ("User name probe " + $where + ": " + $length + " bytes, ASCII '" + $OldName + "' hits " + $asciiHits + ", UTF-16 hits " + $utfHits)
+    }
+}
+
 function Write-UserNameRegistryHits {
     param([string]$OldName, [string]$NewName, [switch]$Write)
     $hits = 0
     $replaced = 0
+    try { Write-UserNameProbe -OldName $OldName } catch {
+        Write-Remax ("User name probe failed: " + $_.Exception.Message)
+    }
     if ([string]::IsNullOrWhiteSpace($OldName)) {
         return @{ Hits = 0; Replaced = 0 }
     }
@@ -3766,6 +3980,52 @@ function Set-CanonComboToLabel {
     $ok = Select-ListedComboItem -Items $opened.Items -Label $pick -Combo $Combo
     Write-Remax ("Selected '" + $pick + "': " + $ok)
     return [bool]$ok
+}
+
+function Select-UiaTab {
+    param($Window, [string]$TabName)
+    if (-not $Window -or [string]::IsNullOrWhiteSpace($TabName)) { return $false }
+    $cond = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+        [System.Windows.Automation.ControlType]::TabItem
+    )
+    $tabs = $null
+    try {
+        $tabs = $Window.FindAll([System.Windows.Automation.TreeScope]::Descendants, $cond)
+    } catch {
+        Write-Remax ("Tab search failed: " + $_.Exception.Message)
+        return $false
+    }
+    foreach ($tab in @($tabs)) {
+        if (-not $tab) { continue }
+        $name = ''
+        try { $name = [string]$tab.Current.Name } catch { $name = '' }
+        if (-not (Test-CanonLabelEquals $name $TabName)) { continue }
+        $pattern = $null
+        try {
+            if ($tab.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+                $pattern.Select()
+                Write-Remax ("Selected tab " + $name)
+                return $true
+            }
+        } catch {
+            Write-Remax ("Tab select failed: " + $_.Exception.Message)
+        }
+        $pattern = $null
+        try {
+            if ($tab.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+                $pattern.Invoke()
+                Write-Remax ("Invoked tab " + $name)
+                return $true
+            }
+        } catch {
+            Write-Remax ("Tab invoke failed: " + $_.Exception.Message)
+        }
+        Write-Remax ("Tab '" + $name + "' had no selection pattern.")
+        return $false
+    }
+    Write-Remax ("Tab '" + $TabName + "' was not found.")
+    return $false
 }
 
 function Set-CanonDeviceOnWindow {
@@ -4564,16 +4824,21 @@ function Enter-InputLock {
     Write-RemaxLine 'Keyboard and mouse are locked for up to 2 minutes while printer settings are applied. Press Ctrl+Alt+Delete to unlock if needed.'
     Start-InputUnlockWatchdog
     $locked = $false
+    $lockError = 0
     if ('RemaxWin32' -as [type]) {
-        try { $locked = [bool][RemaxWin32]::BlockInput($true) } catch { $locked = $false }
+        try {
+            $locked = [bool][RemaxWin32]::TryBlockInput($true, [ref]$lockError)
+        } catch {
+            $locked = $false
+        }
     }
     $script:InputLocked = $locked
     if ($locked) {
         $script:InputLock = @{ State = 'PASS'; Detail = 'Keyboard and mouse were locked during Device Settings, then unlocked.' }
         Write-Remax 'BlockInput returned true.'
     } else {
-        $script:InputLock = @{ State = 'PASS'; Detail = 'BlockInput returned false. Input was not locked. The install continued.' }
-        Write-Remax 'BlockInput returned false. Input was not locked. The install continued.'
+        $script:InputLock = @{ State = 'PASS'; Detail = ('BlockInput returned false. GetLastError ' + $lockError + '. Input was not locked. The install continued.') }
+        Write-Remax ('BlockInput returned false. GetLastError ' + $lockError + '. Input was not locked. The install continued.')
     }
 }
 
@@ -4595,10 +4860,11 @@ function Resume-InputLock {
     $script:InputLockSuspended = $false
     if (-not ('RemaxWin32' -as [type])) { return }
     try {
-        $locked = [bool][RemaxWin32]::BlockInput($true)
+        $lockError = 0
+        $locked = [bool][RemaxWin32]::TryBlockInput($true, [ref]$lockError)
         $script:InputLocked = $locked
         if (-not $locked) {
-            Write-Remax 'BlockInput returned false while restoring the input lock.'
+            Write-Remax ('BlockInput returned false while restoring the input lock. GetLastError ' + $lockError + '.')
         }
     } catch { }
 }
@@ -5909,8 +6175,83 @@ function Invoke-RemaxFirewall {
     $script:Firewall = @{ State = 'MANUAL'; Detail = "Windows Firewall rule RemaxSecure Print (spoolsv) was not added. Allow spoolsv.exe to " + $Target.Host + " port 515 TCP." }
 }
 
+function Test-RemaxNetworkName {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    return ($Name.Trim().ToLowerInvariant() -eq 'remax')
+}
+
+function Get-WlanSsidFromLines {
+    param([string[]]$Lines)
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($line in @($Lines)) {
+        $text = [string]$line
+        if ($text -notmatch '^\s*SSID\s*:\s*(.*)$') { continue }
+        if ($text -match 'BSSID') { continue }
+        $ssid = [string]$Matches[1]
+        $ssid = $ssid.Trim()
+        if ($ssid -and -not $names.Contains($ssid)) { [void]$names.Add($ssid) }
+    }
+    return @($names.ToArray())
+}
+
+function Get-WlanSsids {
+    $lines = @()
+    try { $lines = @(netsh wlan show interfaces) } catch { $lines = @() }
+    return @(Get-WlanSsidFromLines -Lines $lines)
+}
+
+function Get-ConnectionProfileNames {
+    $names = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($profile in @(Get-NetConnectionProfile -ErrorAction SilentlyContinue)) {
+            if (-not $profile) { continue }
+            $name = [string]$profile.Name
+            if ($name -and -not $names.Contains($name)) { [void]$names.Add($name) }
+        }
+    } catch { }
+    return @($names.ToArray())
+}
+
+function Get-RemaxNetworkStatus {
+    $ssids = @(Get-WlanSsids)
+    $profiles = @(Get-ConnectionProfileNames)
+    if ($ssids.Count -eq 0) { Write-Remax 'Detected Wi-Fi SSID: none' }
+    foreach ($ssid in $ssids) { Write-Remax ("Detected Wi-Fi SSID: " + $ssid) }
+    if ($profiles.Count -eq 0) { Write-Remax 'Detected connection profile: none' }
+    foreach ($profile in $profiles) { Write-Remax ("Detected connection profile: " + $profile) }
+    $on = $false
+    $matched = ''
+    foreach ($ssid in $ssids) {
+        if (Test-RemaxNetworkName $ssid) { $on = $true; $matched = $ssid }
+    }
+    foreach ($profile in $profiles) {
+        if (Test-RemaxNetworkName $profile) { $on = $true; if (-not $matched) { $matched = $profile } }
+    }
+    $current = 'none'
+    if ($on) {
+        $current = $matched
+    } else {
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($ssid in $ssids) { if (-not $parts.Contains($ssid)) { [void]$parts.Add($ssid) } }
+        foreach ($profile in $profiles) { if (-not $parts.Contains($profile)) { [void]$parts.Add($profile) } }
+        if ($parts.Count -gt 0) { $current = ($parts -join ', ') }
+    }
+    return @{ OnRemax = $on; Current = $current }
+}
+
 function Invoke-RemaxReachability {
     param($Target)
+    $network = Get-RemaxNetworkStatus
+    if (-not $network.OnRemax) {
+        $script:Reachable = @{
+            State  = 'SKIP'
+            Detail = ('not on REMAX network (current: ' + $network.Current + ')')
+        }
+        Write-Remax ("REACHABLE SKIP " + $script:Reachable.Detail)
+        return
+    }
+    Write-Remax ("Office network REMAX detected (" + $network.Current + "). Testing TCP 515.")
     $bitdefender = $false
     if ($script:BitdefenderKind) { $bitdefender = $true }
     try {
@@ -6109,7 +6450,7 @@ function Invoke-Install {
         }
     }
     $states = @()
-    foreach ($label in @(Get-StatusLabels)) {
+    foreach ($label in @(Get-ResultLabels)) {
         $states += [string]$status[$label].State
     }
     $result = Get-ResultLabel $states
@@ -6237,7 +6578,53 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.7') 'version string is 1.2.7'
+    Assert-Remax ($script:Version -eq '1.2.8') 'version string is 1.2.8'
+    Assert-Remax ($null -ne (Get-Command Select-UiaTab -ErrorAction SilentlyContinue)) 'Select-UiaTab is defined at script scope'
+    $uiaCompile = Test-RemaxUiaHelperCompile
+    Assert-Remax ($uiaCompile.Ok) ('UI helper compile: ' + $uiaCompile.Detail)
+    $helpers = Test-CalledHelpersDefined
+    Assert-Remax ($helpers.Ok) $helpers.Detail
+    $source = Get-RemaxUiaSource
+    Assert-Remax ($source.Contains('InvokePattern')) 'UI helper source uses InvokePattern'
+    Assert-Remax ((Get-RemaxUiReferencePaths).Count -ge 0) 'UI reference lookup runs'
+    Assert-Remax (Test-RemaxNetworkName 'REMAX') 'REMAX matches the office network'
+    Assert-Remax (Test-RemaxNetworkName 'remax') 'remax matches ignoring case'
+    Assert-Remax (-not (Test-RemaxNetworkName 'REMAX-Guest')) 'a longer network name is not REMAX'
+    Assert-Remax (-not (Test-RemaxNetworkName '')) 'a blank network name is not REMAX'
+    $sampleWlan = @(
+        '    Name                   : Wi-Fi',
+        '    SSID                   : REMAX',
+        '    BSSID                  : aa:bb:cc:dd:ee:ff',
+        '    SSID                   : remax'
+    )
+    $parsedSsids = @(Get-WlanSsidFromLines -Lines $sampleWlan)
+    Assert-Remax ($parsedSsids.Count -eq 2 -and $parsedSsids[0] -eq 'REMAX' -and $parsedSsids[1] -eq 'remax') 'SSID lines are read and BSSID is ignored'
+    Assert-Remax ((Get-ResultLabel @('PASS', 'SKIP')) -eq 'PASS') 'SKIP does not change RESULT'
+    $portTarget = @{ Host = '172.16.105.21'; Queue = 'RemaxSecure'; PortName = '172.16.105.21'; Uri = 'lpd://172.16.105.21/RemaxSecure'; ByteCount = $true }
+    $unreadPort = @{
+        Name = '172.16.105.21'; Host = '172.16.105.21'; Queue = 'RemaxSecure'; Protocol = 2; PortNumber = 515
+        ByteCount = $false; ByteCountKnown = $false; SnmpEnabled = $false; SnmpKnown = $false; Registry = $null
+    }
+    Assert-Remax (Test-PortMatches $unreadPort $portTarget) 'LPR host queue protocol 2 and SNMP false pass when byte count was not read'
+    $snmpString = @{
+        Name = '172.16.105.21'; Host = '172.16.105.21'; Queue = 'RemaxSecure'; Protocol = 2; PortNumber = 0
+        ByteCount = $true; ByteCountKnown = $true; SnmpEnabled = 'False'; SnmpKnown = $true
+        Registry = @{ Protocol = 2; Queue = 'RemaxSecure'; ByteCount = $null; Snmp = 0 }
+    }
+    Assert-Remax (Test-PortMatches $snmpString $portTarget) 'SNMP string False is off'
+    Assert-Remax (-not (Test-PortMatches @{ Name = '172.16.105.21'; Host = '172.16.105.21'; Queue = 'RemaxSecure'; Protocol = 2; PortNumber = 515; ByteCount = $false; ByteCountKnown = $true; SnmpEnabled = $false; SnmpKnown = $true; Registry = $null } $portTarget)) 'a read byte count of off fails'
+    Assert-Remax (-not (ConvertTo-FlagEnabled 'False')) 'the string False is not enabled'
+    Assert-Remax (ConvertTo-FlagEnabled 'True') 'the string True is enabled'
+    $probes = @(Get-UserNameProbeTargets)
+    $sawDefault = $false
+    $sawPlain = $false
+    $sawUnc = $false
+    foreach ($probe in $probes) {
+        if ($probe.Value -eq 'Default DevMode') { $sawDefault = $true }
+        if ($probe.Value -eq 'RemaxSecure') { $sawPlain = $true }
+        if ([string]$probe.Value -like '\\*\RemaxSecure') { $sawUnc = $true }
+    }
+    Assert-Remax ($sawDefault -and $sawPlain -and $sawUnc) 'Default DevMode and per-user RemaxSecure values are probed'
     Assert-Remax ($script:ExportedPrintUser -eq 'tsiogase') 'exported print username to replace is tsiogase'
     Assert-Remax (Test-UserInformationTitle 'User Information Settings') 'User Information Settings title is accepted'
     Assert-Remax (-not (Test-UserInformationTitle 'RemaxSecure Properties')) 'printer properties is not the user dialog'

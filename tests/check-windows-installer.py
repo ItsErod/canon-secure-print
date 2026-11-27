@@ -106,7 +106,12 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.7",
+        "1.2.8",
+        "Select-UiaTab",
+        "UIAutomationTypes",
+        "GetLastWin32Error",
+        "Default DevMode",
+        "not on REMAX network",
         "User Information Settings",
         "tsiogase",
         "remaxsecure-device-settings.dat",
