@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Remax Secure Printer - Windows installer 1.2.5
+# Remax Secure Printer - Windows installer 1.2.6
 # RE/MAX Escarpment IT. Ground truth is the recorded Windows 11 setup.
 #
 # Elevated PowerShell (Run as administrator). The script asks for the print
@@ -63,13 +63,19 @@
 #     Get Device Information is not changed
 #   PASS on those lines requires a property readback or a dialog readback
 #   after Printer properties is reopened. MANUAL means that item was not
-#   confirmed. Optional REMAX_DEVICE_DAT restores printer-specific data and
-#   the global DEVMODE (PrintUI /Sr d g) before the dialog runs.
+#   confirmed. The primary Device Settings path is a PrintUI /Sr restore of
+#   the published remaxsecure-device-settings.dat (d g r). UI clicks for
+#   Cassette Feeding Unit and Output Options run only if that restore fails
+#   or the readback shows them unset. The print username is applied after
+#   the restore so it replaces the name stored in the file.
 
-$script:Version = '1.2.5'
+$script:Version = '1.2.6'
 $script:CanonPkgUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/Canon-PS3-v30.00-x64.zip'
 $script:CanonPkgSha256 = '4db0d69d0b6417c39ed285698f9dc23dc5a90c6e3372c8f04da68b1d19b678da'
 $script:CanonPkgBytes = 26722033
+$script:DeviceDatUrl = 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/remaxsecure-device-settings.dat'
+$script:DeviceDatSha256 = 'a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279'
+$script:DeviceDatBytes = 44692
 $script:CanonInfLeaf = 'CNS30UA64.INF'
 $script:RawUrl = 'https://raw.githubusercontent.com/ItsErod/canon-secure-print/main/install-windows.ps1'
 $script:PrinterName = 'RemaxSecure'
@@ -193,8 +199,10 @@ Environment (set them in the elevated PowerShell window):
   REMAX_LPR_BYTE_COUNT   Default on. Set to 0 to disable LPR byte counting.
   REMAX_MODE             Set to verify for irm | iex read-only mode.
   REMAX_DEVICE_UI        Set to 0 to skip Printer properties automation.
-  REMAX_DEVICE_DAT       Optional PrintUI file. Restored with /Sr d g r
-                         before Device Settings automation.
+  REMAX_DEVICE_DAT       Optional PrintUI file. A local path or an https URL.
+                         When unset, the built-in remaxsecure-device-settings.dat
+                         release is downloaded and its size and SHA256 are
+                         checked. Restored with /Sr d g r before the username.
   REMAX_SKIP_CLEANUP     Set to 1 to keep an existing queue, port, and driver.
   REMAX_SKIP_FIREWALL    Set to 1 to skip the firewall rule and AV note.
   REMAX_PS_OUTPUT        Optional PS Output from Application value.
@@ -3529,7 +3537,10 @@ function Set-CanonComboToLabel {
 }
 
 function Set-CanonDeviceOnWindow {
-    param($Window, [string]$PrintUser, [int]$ProcessId)
+    param($Window, [string]$PrintUser, [int]$ProcessId, [string]$Scope)
+    if ([string]::IsNullOrWhiteSpace($Scope)) { $Scope = 'all' }
+    $doHardware = ($Scope -eq 'all' -or $Scope -eq 'hardware')
+    $doUser = ($Scope -eq 'all' -or $Scope -eq 'user')
     Show-CanonWindow $Window
     $tabOk = Select-UiaTab -Window $Window -TabName 'Device Settings'
     if (-not $tabOk) { return }
@@ -3537,7 +3548,7 @@ function Set-CanonDeviceOnWindow {
     $elements = Get-UiaDescendants $Window
     Write-UiaSummary $elements
     $targets = Find-CanonDeviceTargets $elements
-    if ($targets.Profile) {
+    if ($doHardware -and $targets.Profile) {
         $opened = Get-CanonComboChoices $targets.Profile
         $pick = Resolve-ProfileLabel $opened.Labels
         if ($pick) {
@@ -3553,24 +3564,24 @@ function Set-CanonDeviceOnWindow {
     }
     $keep = [IntPtr]::Zero
     try { $keep = [IntPtr]$Window.Current.NativeWindowHandle } catch { $keep = [IntPtr]::Zero }
-    if ($targets.PaperCheck) {
+    if ($doHardware -and $targets.PaperCheck) {
         $ok = Set-CanonCheck -Snapshot $targets.PaperCheck -On $true
         Write-Remax ("Cassette Feeding Unit checkbox set On: " + $ok)
         Start-Sleep -Milliseconds 300
         [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
-    } elseif ($targets.PaperCombo) {
+    } elseif ($doHardware -and $targets.PaperCombo) {
         $ok = Set-CanonComboToLabel -Combo $targets.PaperCombo -Kind 'paper'
         Write-Remax ("Paper Source Options combo set to Cassette Feeding Unit: " + $ok)
         Start-Sleep -Milliseconds 300
         [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
-    } else {
+    } elseif ($doHardware) {
         Write-Remax "Cassette Feeding Unit checkbox and Paper Source Options combo were not found."
     }
-    if ($targets.OutputCombo) {
+    if ($doHardware -and $targets.OutputCombo) {
         $ok = Set-CanonComboToLabel -Combo $targets.OutputCombo -Kind 'output'
         if (-not $ok) {
             $ok = Set-Win32ComboValue -Snapshot $targets.OutputCombo -Want 'Inner Finisher E1'
@@ -3580,11 +3591,11 @@ function Set-CanonDeviceOnWindow {
         [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
         $elements = Get-UiaDescendants $Window
         $targets = Find-CanonDeviceTargets $elements
-    } else {
+    } elseif ($doHardware) {
         Write-Remax "Output Options combo was not found."
     }
     $psChoice = Get-PsOutputChoice
-    if ($psChoice -and $targets.PsOutput) {
+    if ($doHardware -and $psChoice -and $targets.PsOutput) {
         Write-Remax ("REMAX_PS_OUTPUT is '" + $psChoice + "'.")
         $opened = Get-CanonComboChoices $targets.PsOutput
         $pick = Resolve-CanonChoiceLabel -Labels $opened.Labels -Accept @($psChoice)
@@ -3594,19 +3605,22 @@ function Set-CanonDeviceOnWindow {
             Collapse-CanonCombo $targets.PsOutput
             [void](Set-Win32ComboValue -Snapshot $targets.PsOutput -Want $psChoice)
         }
-    } else {
+    } elseif ($doHardware) {
         Write-Remax "PS Output from Application left unchanged."
     }
-    $elements = Get-UiaDescendants $Window
-    $apply = Select-LabeledControl -Elements $elements -Labels @('Apply') -ControlType 'Button'
-    if ($apply -and $apply.Enabled) {
-        Write-Remax "Apply after Paper Source and Output Options."
-        [void](Invoke-CanonButton -Snapshot $apply -How post)
-        Start-Sleep -Milliseconds 400
-        [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
+    if ($doHardware) {
+        $elements = Get-UiaDescendants $Window
+        $apply = Select-LabeledControl -Elements $elements -Labels @('Apply') -ControlType 'Button'
+        if ($apply -and $apply.Enabled) {
+            Write-Remax "Apply after Paper Source and Output Options."
+            [void](Invoke-CanonButton -Snapshot $apply -How post)
+            Start-Sleep -Milliseconds 400
+            [void](Dismiss-CanonPrompt -ProcessId $ProcessId -Keep $keep)
+        }
+        $elements = Get-UiaDescendants $Window
+        $targets = Find-CanonDeviceTargets $elements
     }
-    $elements = Get-UiaDescendants $Window
-    $targets = Find-CanonDeviceTargets $elements
+    if (-not $doUser) { return }
     if ($targets.UserInfo -and $targets.UserInfo.Toggle -ne 'On') {
         [void](Set-CanonCheck -Snapshot $targets.UserInfo -On $true)
         Start-Sleep -Milliseconds 300
@@ -3624,7 +3638,7 @@ function Set-CanonDeviceOnWindow {
 }
 
 function Read-CanonDeviceFromWindow {
-    param($Window, [string]$PrintUser, [int]$ProcessId)
+    param($Window, [string]$PrintUser, [int]$ProcessId, [switch]$DeviceOnly)
     $read = New-CanonRead
     $read.Opened = $true
     Show-CanonWindow $Window
@@ -3667,7 +3681,7 @@ function Read-CanonDeviceFromWindow {
         $read.UserInfoSeen = $true
         $read.UserInfoOn = ($targets.UserInfo.Toggle -eq 'On')
     }
-    if ($targets.UserSettings) {
+    if ((-not $DeviceOnly) -and $targets.UserSettings) {
         $info = Update-DefaultValueDialog -Window $Window -Button $targets.UserSettings -PrintUser $PrintUser -ProcessId $ProcessId -ReadOnly
         $read.UserDialog = [bool]$info.Opened
         if ($info.Read) {
@@ -3779,41 +3793,429 @@ function Convert-CanonReadToResult {
     return $result
 }
 
-function Restore-CanonDeviceDat {
+function Get-PrintUiRestoreArgument {
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    $trim = $Path.Trim()
-    if ($trim.Contains('"') -or $trim.Contains("'")) {
-        Write-Remax "REMAX_DEVICE_DAT contains a quote. Restore skipped."
-        return $false
+    return ('printui.dll,PrintUIEntry /Sr /n "' + $script:PrinterName + '" /a "' + $Path + '" d g r')
+}
+
+function Resolve-DeviceDatRequest {
+    $raw = ''
+    if ($env:REMAX_DEVICE_DAT) { $raw = $env:REMAX_DEVICE_DAT.Trim() }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return @{ Kind = 'url'; Location = $script:DeviceDatUrl; Pinned = $true }
     }
-    if (-not (Test-Path -LiteralPath $trim)) {
-        Write-Remax ("REMAX_DEVICE_DAT was not found: " + $trim)
-        return $false
+    if ($raw -match '^(?i)https?://') {
+        $pinned = ($raw -eq $script:DeviceDatUrl)
+        return @{ Kind = 'url'; Location = $raw; Pinned = $pinned }
     }
+    return @{ Kind = 'file'; Location = $raw; Pinned = $false }
+}
+
+function Test-PinnedDeviceDat {
+    param([string]$Hash, [long]$Length)
+    $problems = New-Object System.Collections.Generic.List[string]
+    if ($Length -ne [long]$script:DeviceDatBytes) {
+        [void]$problems.Add("size " + $Length + " (expected " + $script:DeviceDatBytes + ")")
+    }
+    $got = ''
+    if ($Hash) { $got = $Hash.Trim().ToLowerInvariant() }
+    if ($got -ne $script:DeviceDatSha256) {
+        [void]$problems.Add("SHA256 " + $got + " (expected " + $script:DeviceDatSha256 + ")")
+    }
+    if ($problems.Count -gt 0) {
+        $detail = "Device Settings download failed verification. " + ($problems -join '. ') + ". The file was not restored."
+        return @{ Ok = $false; Detail = $detail }
+    }
+    return @{ Ok = $true; Detail = ("SHA256 " + $script:DeviceDatSha256) }
+}
+
+function Get-DeviceDatFile {
+    $request = Resolve-DeviceDatRequest
+    if ($request.Location.Contains('"') -or $request.Location.Contains("'")) {
+        return @{ Ok = $false; Detail = 'REMAX_DEVICE_DAT contains a quote. Restore skipped.' }
+    }
+    if ($request.Kind -eq 'file') {
+        if (-not (Test-Path -LiteralPath $request.Location)) {
+            return @{ Ok = $false; Detail = ('REMAX_DEVICE_DAT was not found: ' + $request.Location) }
+        }
+        Write-Remax ("Using local Device Settings file " + $request.Location)
+        return @{ Ok = $true; Path = $request.Location; Pinned = $false; Detail = 'local file' }
+    }
+    $destDir = $script:SupportDir
+    if ([string]::IsNullOrWhiteSpace($destDir)) { $destDir = [System.IO.Path]::GetTempPath() }
+    if (-not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+    }
+    $dest = Join-Path $destDir 'remaxsecure-device-settings.dat'
+    Write-Remax ("Downloading Device Settings " + $request.Location)
+    try {
+        Save-RemaxDownload -Url $request.Location -Destination $dest
+    } catch {
+        return @{ Ok = $false; Detail = ("Device Settings download failed: " + $_.Exception.Message) }
+    }
+    $length = [long](Get-Item -LiteralPath $dest).Length
+    $hash = Get-FileSha256 $dest
+    Write-Remax ("Device Settings file size " + $length + ", SHA256 " + $hash)
+    if ($request.Pinned) {
+        $check = Test-PinnedDeviceDat -Hash $hash -Length $length
+        if (-not $check.Ok) {
+            Write-Remax $check.Detail
+            return @{ Ok = $false; Detail = $check.Detail; Path = $dest }
+        }
+        Write-Remax $check.Detail
+    } else {
+        Write-Remax "REMAX_DEVICE_DAT is not the built-in file, so the pinned SHA256 is not applied."
+    }
+    return @{ Ok = $true; Path = $dest; Pinned = [bool]$request.Pinned; Detail = $hash }
+}
+
+function Invoke-PrintUiRestore {
+    param([string]$Path)
     $rundll = Get-RemaxRundllPath
-    $arg = 'printui.dll,PrintUIEntry /Sr /n "' + $script:PrinterName + '" /a "' + $trim + '" d g r'
-    Write-Remax ("Restoring printer-specific data and global DEVMODE from " + $trim)
+    $arg = Get-PrintUiRestoreArgument $Path
+    Write-Remax ("Restoring Device Settings from " + $Path)
     Write-Remax ($rundll + ' ' + $arg)
+    $global:LASTEXITCODE = 0
     $proc = $null
     try {
-        $proc = New-Object System.Diagnostics.Process
-        $proc.StartInfo.FileName = $rundll
-        $proc.StartInfo.Arguments = $arg
-        $proc.StartInfo.UseShellExecute = $false
-        $proc.StartInfo.CreateNoWindow = $true
-        [void]$proc.Start()
+        $proc = Start-Process -FilePath $rundll -ArgumentList @(
+            'printui.dll,PrintUIEntry',
+            '/Sr',
+            '/n',
+            $script:PrinterName,
+            '/a',
+            $Path,
+            'd',
+            'g',
+            'r'
+        ) -Wait -PassThru -WindowStyle Hidden
     } catch {
-        Write-Remax ("PrintUI restore did not start: " + $_.Exception.Message)
+        $detail = "PrintUI restore did not start: " + $_.Exception.Message
+        Write-Remax $detail
+        return @{ Ok = $false; ExitCode = 1; LastExitCode = $global:LASTEXITCODE; Detail = $detail }
+    }
+    $code = 1
+    if ($proc -and $null -ne $proc.ExitCode) { $code = [int]$proc.ExitCode }
+    $last = $global:LASTEXITCODE
+    Write-Remax ("PrintUI /Sr process exit " + $code)
+    Write-Remax ("LASTEXITCODE after PrintUI /Sr: " + $last)
+    $ok = ($code -eq 0)
+    if ($null -ne $last -and ([int]$last) -ne 0) {
+        Write-Remax "LASTEXITCODE is not 0. Treating the PrintUI restore as failed."
+        $ok = $false
+    }
+    $global:LASTEXITCODE = $code
+    return @{ Ok = $ok; ExitCode = $code; LastExitCode = $last; Detail = ("PrintUI /Sr exit " + $code + ", LASTEXITCODE " + $last) }
+}
+
+function Restore-CanonDeviceDat {
+    param([string]$Path)
+    $result = Invoke-PrintUiRestore -Path $Path
+    return [bool]$result.Ok
+}
+
+function Get-PrinterDriverDataPath {
+    return ('HKLM:\SYSTEM\CurrentControlSet\Control\Print\Printers\' + $script:PrinterName + '\PrinterDriverData')
+}
+
+function Format-DriverDataValue {
+    param($Raw, [string]$Kind)
+    if ($null -eq $Raw) { return ($Kind + ':') }
+    if ($Raw -is [byte[]]) {
+        $hash = ''
+        try { $hash = Get-BytesSha256 -Data $Raw } catch { $hash = 'unread' }
+        return ('bytes:' + $Raw.Length + ':' + $hash)
+    }
+    $text = [string]$Raw
+    if ($text.Length -gt 180) { $text = $text.Substring(0, 180) + '...(len ' + $text.Length + ')' }
+    return ($Kind + ':' + $text)
+}
+
+function Get-PrinterDriverDataSnapshot {
+    $path = Get-PrinterDriverDataPath
+    $map = @{}
+    if (-not (Test-Path -LiteralPath $path)) { return $map }
+    try {
+        $key = Get-Item -LiteralPath $path
+        foreach ($name in @($key.GetValueNames())) {
+            $label = [string]$name
+            if ([string]::IsNullOrEmpty($label)) { $label = '(default)' }
+            $raw = $null
+            $kind = ''
+            try { $raw = $key.GetValue($name) } catch { $raw = $null }
+            try { $kind = [string]$key.GetValueKind($name) } catch { $kind = '' }
+            $map[$label] = Format-DriverDataValue -Raw $raw -Kind $kind
+        }
+    } catch {
+        Write-Remax ("PrinterDriverData snapshot failed: " + $_.Exception.Message)
+    }
+    return $map
+}
+
+function Get-DriverDataChangeCount {
+    param($Before, $After)
+    if (-not $Before) { $Before = @{} }
+    if (-not $After) { $After = @{} }
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($Before.Keys)) {
+        $text = [string]$name
+        if (-not $names.Contains($text)) { [void]$names.Add($text) }
+    }
+    foreach ($name in @($After.Keys)) {
+        $text = [string]$name
+        if (-not $names.Contains($text)) { [void]$names.Add($text) }
+    }
+    $changed = 0
+    foreach ($name in $names) {
+        $left = ''
+        $right = ''
+        if ($Before.Contains($name)) { $left = [string]$Before[$name] }
+        if ($After.Contains($name)) { $right = [string]$After[$name] }
+        if ($left -ne $right) { $changed = $changed + 1 }
+    }
+    return $changed
+}
+
+function Write-PrinterDriverDataDiff {
+    param($Before, $After)
+    if (-not $Before) { $Before = @{} }
+    if (-not $After) { $After = @{} }
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($name in @($Before.Keys)) {
+        $text = [string]$name
+        if (-not $names.Contains($text)) { [void]$names.Add($text) }
+    }
+    foreach ($name in @($After.Keys)) {
+        $text = [string]$name
+        if (-not $names.Contains($text)) { [void]$names.Add($text) }
+    }
+    $changed = 0
+    foreach ($name in $names) {
+        $left = ''
+        $right = ''
+        if ($Before.Contains($name)) { $left = [string]$Before[$name] }
+        if ($After.Contains($name)) { $right = [string]$After[$name] }
+        if ($left -ne $right) {
+            $changed = $changed + 1
+            Write-Remax ("PrinterDriverData changed " + $name + " from [" + $left + "] to [" + $right + "]")
+        }
+    }
+    Write-Remax ("PrinterDriverData values changed: " + $changed)
+    return $changed
+}
+
+function Test-PaperSourceUnset {
+    param($Read)
+    if (-not $Read -or -not $Read.PaperSeen) { return $false }
+    $match = Resolve-PaperSourceLabel -Labels @([string]$Read.PaperValue)
+    if ($match) { return $false }
+    return $true
+}
+
+function Test-OutputOptionsUnset {
+    param($Read)
+    if (-not $Read -or -not $Read.OutputSeen) { return $false }
+    $match = Resolve-FinisherLabel -Labels @([string]$Read.OutputValue)
+    if ($match) { return $false }
+    return $true
+}
+
+function Test-DatRestoreConfirmed {
+    param([bool]$RestoreOk, [bool]$PaperUnset, [bool]$OutputUnset, [bool]$PaperSeen, [bool]$OutputSeen, [int]$Changed)
+    if (-not $RestoreOk) { return $false }
+    if ($PaperUnset -or $OutputUnset) { return $false }
+    if ($PaperSeen -and $OutputSeen) { return $true }
+    if ($Changed -gt 0) { return $true }
+    return $false
+}
+
+function Protect-QueueIdentity {
+    $printer = Get-PrinterOrNull $script:PrinterName
+    if (-not $printer) {
+        Write-Remax "RemaxSecure was missing after the PrintUI restore."
         return $false
     }
-    if (-not $proc.WaitForExit(20000)) {
-        Write-Remax "PrintUI restore timed out."
-        try { $proc.Kill() } catch { }
+    $port = ''
+    $name = ''
+    try { $port = [string]$printer.PortName } catch { $port = '' }
+    try { $name = [string]$printer.Name } catch { $name = '' }
+    Write-Remax ("Queue after PrintUI restore: name " + $name + ", port " + $port)
+    if ($name -and $name -ne $script:PrinterName) {
+        Write-Remax ("Printer name changed to " + $name + ".")
         return $false
     }
-    Write-Remax ("PrintUI restore exit " + $proc.ExitCode)
-    return ($proc.ExitCode -eq 0)
+    if ($port -and $port -ne $script:PortName) {
+        Write-Remax ("Port changed to " + $port + ". Setting it back to " + $script:PortName + ".")
+        try {
+            Set-Printer -Name $script:PrinterName -PortName $script:PortName
+            Write-Remax ("Port is " + $script:PortName + " again.")
+        } catch {
+            Write-Remax ("Could not restore the port name: " + $_.Exception.Message)
+            return $false
+        }
+    }
+    return $true
+}
+
+function Invoke-DeviceSettingsReadOnly {
+    $result = @{
+        Opened      = $false
+        PaperSeen   = $false
+        PaperValue  = ''
+        OutputSeen  = $false
+        OutputValue = ''
+        Error       = ''
+    }
+    $skip = Get-DeviceUiSkipReason
+    if ($skip) {
+        $result.Error = $skip
+        Write-Remax ("Device Settings readback skipped: " + $skip)
+        return $result
+    }
+    try {
+        Initialize-RemaxUi
+    } catch {
+        $result.Error = $_.Exception.Message
+        Write-Remax ("UI Automation could not load for readback: " + $result.Error)
+        return $result
+    }
+    Enter-InputLock
+    $session = $null
+    try {
+        $session = Open-RemaxProperties
+        if (-not $session.Window) {
+            $result.Error = [string]$session.Error
+            Write-Remax ("Device Settings readback did not open: " + $result.Error)
+            return $result
+        }
+        $read = Read-CanonDeviceFromWindow -Window $session.Window -PrintUser '' -ProcessId $session.Process.Id -DeviceOnly
+        $result.Opened = [bool]$read.Opened
+        $result.PaperSeen = [bool]$read.PaperSeen
+        $result.PaperValue = [string]$read.PaperValue
+        $result.OutputSeen = [bool]$read.OutputSeen
+        $result.OutputValue = [string]$read.OutputValue
+        $result.Error = [string]$read.Error
+        Write-Remax ("Device Settings readback Cassette Feeding Unit='" + $result.PaperValue + "' seen=" + $result.PaperSeen + " Output Options='" + $result.OutputValue + "' seen=" + $result.OutputSeen)
+        Close-RemaxProperties -Session $session
+    } catch {
+        $result.Error = $_.Exception.Message
+        Write-Remax ("Device Settings readback failed: " + $result.Error)
+    } finally {
+        Exit-InputLock
+        if ($session -and $session.Process) { Stop-RemaxUiProcess $session.Process }
+    }
+    return $result
+}
+
+function Restart-SpoolerForReadback {
+    Write-Remax "Device Settings readback did not confirm the restore. Restarting the Print Spooler and reading again."
+    try {
+        Restart-Service Spooler -Force -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        Write-Remax "Print Spooler restarted."
+    } catch {
+        Write-Remax ("Restart-Service Spooler failed: " + $_.Exception.Message)
+    }
+}
+
+function Invoke-RemaxDeviceSettings {
+    param([string]$PrintUser)
+    Show-RemaxProgress 'Device Settings'
+    try {
+        $rows = @(Get-PrinterProperty -PrinterName $script:PrinterName -ErrorAction Stop)
+        Write-PrinterPropertyInventory $rows
+    } catch {
+        Write-Remax ("Get-PrinterProperty failed: " + $_.Exception.Message)
+    }
+    $before = Get-PrinterDriverDataSnapshot
+    Write-Remax ("PrinterDriverData values before restore: " + @($before.Keys).Count)
+    $file = Get-DeviceDatFile
+    $restore = @{ Ok = $false; ExitCode = 1; LastExitCode = 1; Detail = [string]$file.Detail }
+    if ($file.Ok) {
+        try {
+            $restore = Invoke-PrintUiRestore -Path $file.Path
+        } catch {
+            $restore = @{ Ok = $false; ExitCode = 1; LastExitCode = $global:LASTEXITCODE; Detail = $_.Exception.Message }
+            Write-Remax ("PrintUI restore failed: " + $_.Exception.Message)
+        }
+    } else {
+        Write-Remax $file.Detail
+    }
+    try {
+        $mode = Set-OneSided
+        Write-Remax ("DuplexingMode readback after PrintUI restore: " + $mode)
+    } catch {
+        Write-Remax ("One-sided setting failed after PrintUI restore: " + $_.Exception.Message)
+    }
+    [void](Protect-QueueIdentity)
+    Start-Sleep -Seconds 1
+    $after = Get-PrinterDriverDataSnapshot
+    $changed = Write-PrinterDriverDataDiff -Before $before -After $after
+    $read = Invoke-DeviceSettingsReadOnly
+    $paperUnset = Test-PaperSourceUnset $read
+    $outputUnset = Test-OutputOptionsUnset $read
+    $confirmed = Test-DatRestoreConfirmed -RestoreOk ([bool]$restore.Ok) -PaperUnset $paperUnset -OutputUnset $outputUnset -PaperSeen ([bool]$read.PaperSeen) -OutputSeen ([bool]$read.OutputSeen) -Changed $changed
+    if (-not $confirmed -and $restore.Ok) {
+        Restart-SpoolerForReadback
+        [void](Protect-QueueIdentity)
+        try {
+            $mode = Set-OneSided
+            Write-Remax ("DuplexingMode readback after spooler restart: " + $mode)
+        } catch {
+            Write-Remax ("One-sided setting failed after spooler restart: " + $_.Exception.Message)
+        }
+        $after = Get-PrinterDriverDataSnapshot
+        $changed = Write-PrinterDriverDataDiff -Before $before -After $after
+        $read = Invoke-DeviceSettingsReadOnly
+        $paperUnset = Test-PaperSourceUnset $read
+        $outputUnset = Test-OutputOptionsUnset $read
+        $confirmed = Test-DatRestoreConfirmed -RestoreOk ([bool]$restore.Ok) -PaperUnset $paperUnset -OutputUnset $outputUnset -PaperSeen ([bool]$read.PaperSeen) -OutputSeen ([bool]$read.OutputSeen) -Changed $changed
+    }
+    $scope = 'all'
+    if ($confirmed) {
+        Write-Remax "Device Settings restored from the PrintUI file. Skipping Paper Source and Output Options clicks."
+        $scope = 'user'
+    } else {
+        Write-Remax "PrintUI restore did not confirm Cassette Feeding Unit and Inner Finisher E1. Falling back to UI Automation clicks."
+    }
+    $ui = $null
+    try {
+        $ui = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope $scope
+    } catch {
+        Write-Remax ("Device Settings automation failed: " + $_.Exception.Message)
+        $ui = New-DeviceUiResult
+        $ui.Attempted = $true
+        $ui.PaperDetail = $_.Exception.Message
+        $ui.OutputDetail = $_.Exception.Message
+        $ui.UserInfoDetail = $_.Exception.Message
+        $ui.UserNameDetail = $_.Exception.Message
+    }
+    if ($confirmed -and $ui) {
+        $laterUnset = $false
+        if ($ui.PaperState -and $ui.PaperState -ne 'PASS' -and $ui.PaperDetail -match 'readback:') { $laterUnset = $true }
+        if ($ui.OutputState -and $ui.OutputState -ne 'PASS' -and $ui.OutputDetail -match 'readback:') { $laterUnset = $true }
+        if ($laterUnset) {
+            Write-Remax "A later Device Settings readback no longer shows the restored Paper Source or Output Options. Falling back to UI Automation clicks."
+            $click = $null
+            try {
+                $click = Invoke-CanonDeviceAutomation -PrintUser $PrintUser -Action 'apply' -Scope 'hardware'
+            } catch {
+                Write-Remax ("Paper Source and Output Options click fallback failed: " + $_.Exception.Message)
+            }
+            if ($click) {
+                $ui.PaperState = $click.PaperState
+                $ui.PaperDetail = $click.PaperDetail
+                $ui.OutputState = $click.OutputState
+                $ui.OutputDetail = $click.OutputDetail
+            }
+        } else {
+            $ui.PaperState = 'PASS'
+            $ui.PaperDetail = 'Cassette Feeding Unit (source: dat)'
+            $ui.OutputState = 'PASS'
+            $ui.OutputDetail = 'Inner Finisher E1 (source: dat)'
+        }
+    }
+    return $ui
 }
 
 function Test-SkipInputLock {
@@ -3944,7 +4346,7 @@ function Resume-InputLock {
 }
 
 function Invoke-CanonDeviceAutomation {
-    param([string]$PrintUser, [string]$Action)
+    param([string]$PrintUser, [string]$Action, [string]$Scope)
     $result = New-DeviceUiResult
     $skip = Get-DeviceUiSkipReason
     if ($skip) {
@@ -3962,11 +4364,7 @@ function Invoke-CanonDeviceAutomation {
         $result.UserNameDetail = $msg
         return $result
     }
-    if ($Action -eq 'apply' -and $env:REMAX_DEVICE_DAT) {
-        try { [void](Restore-CanonDeviceDat $env:REMAX_DEVICE_DAT.Trim()) } catch {
-            Write-Remax ("PrintUI restore failed: " + $_.Exception.Message)
-        }
-    }
+    if ([string]::IsNullOrWhiteSpace($Scope)) { $Scope = 'all' }
     Show-RemaxProgress 'Device Settings'
     Enter-InputLock
     $sessions = New-Object System.Collections.Generic.List[object]
@@ -3980,7 +4378,7 @@ function Invoke-CanonDeviceAutomation {
                 $openError = [string]$session.Error
             } else {
                 try {
-                    Set-CanonDeviceOnWindow -Window $session.Window -PrintUser $PrintUser -ProcessId $session.Process.Id
+                    Set-CanonDeviceOnWindow -Window $session.Window -PrintUser $PrintUser -ProcessId $session.Process.Id -Scope $Scope
                 } catch {
                     Write-Remax ("Device Settings edit failed: " + $_.Exception.Message)
                 }
@@ -5431,30 +5829,8 @@ function Invoke-Install {
         $status['SIDES'].Detail = ("Set-PrintConfiguration OneSided failed: " + $duplexError)
     }
     if ($queueRank -ge 1) {
-        $property = $null
-        try {
-            $property = Invoke-CanonPropertySettings -PrintUser $printUser -Action 'apply'
-        } catch {
-            Write-Remax ("Get-PrinterProperty path failed: " + $_.Exception.Message)
-            $property = New-PropertyResult
-        }
-        $ui = $null
-        if (Test-PropertyResultComplete $property) {
-            Write-Remax "Paper Source Options, Output Options, Set User Information, and User Name were confirmed with Get-PrinterProperty. Skipping UI Automation."
-        } else {
-            try {
-                $ui = Invoke-CanonDeviceAutomation -PrintUser $printUser -Action 'apply'
-            } catch {
-                Write-Remax ("Device Settings automation failed: " + $_.Exception.Message)
-                $ui = New-DeviceUiResult
-                $ui.Attempted = $true
-                $ui.PaperDetail = $_.Exception.Message
-                $ui.OutputDetail = $_.Exception.Message
-                $ui.UserInfoDetail = $_.Exception.Message
-                $ui.UserNameDetail = $_.Exception.Message
-            }
-        }
-        Apply-DeviceUiResult -Status $status -Ui $ui -Property $property -PrintUser $printUser
+        $ui = Invoke-RemaxDeviceSettings -PrintUser $printUser
+        Apply-DeviceUiResult -Status $status -Ui $ui -Property $null -PrintUser $printUser
         $mode = ''
         try {
             $mode = Set-OneSided
@@ -5603,7 +5979,41 @@ C5235.UFR = "Canon iR-ADV C5235/5240 UFR II"
     Assert-Remax ((Get-ExitCodeForResult 'PASS') -eq 0) 'PASS exits 0'
     Assert-Remax ((Get-ExitCodeForResult 'PARTIAL') -eq 2) 'PARTIAL exits 2'
     Assert-Remax ((Get-ExitCodeForResult 'FAIL') -eq 1) 'FAIL exits 1'
-    Assert-Remax ($script:Version -eq '1.2.5') 'version string is 1.2.5'
+    Assert-Remax ($script:Version -eq '1.2.6') 'version string is 1.2.6'
+    Assert-Remax ($script:DeviceDatBytes -eq 44692) 'device settings file is 44692 bytes'
+    Assert-Remax ($script:DeviceDatSha256 -eq 'a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279') 'device settings SHA256 is pinned'
+    Assert-Remax ($script:DeviceDatUrl -eq 'https://github.com/ItsErod/canon-secure-print/releases/download/driver-v30/remaxsecure-device-settings.dat') 'device settings URL is the release asset'
+    $savedDat = $env:REMAX_DEVICE_DAT
+    Remove-Item Env:REMAX_DEVICE_DAT -ErrorAction SilentlyContinue
+    $defaultDat = Resolve-DeviceDatRequest
+    Assert-Remax ($defaultDat.Kind -eq 'url' -and $defaultDat.Pinned -and $defaultDat.Location -eq $script:DeviceDatUrl) 'unset REMAX_DEVICE_DAT uses the pinned release'
+    $env:REMAX_DEVICE_DAT = 'https://example.test/other.dat'
+    $otherDat = Resolve-DeviceDatRequest
+    Assert-Remax ($otherDat.Kind -eq 'url' -and -not $otherDat.Pinned) 'an https override is downloaded without the pinned hash'
+    $env:REMAX_DEVICE_DAT = 'C:\Settings\remaxsecure.dat'
+    $localDat = Resolve-DeviceDatRequest
+    Assert-Remax ($localDat.Kind -eq 'file' -and $localDat.Location -eq 'C:\Settings\remaxsecure.dat') 'a local REMAX_DEVICE_DAT path is used as a file'
+    if ($null -eq $savedDat) { Remove-Item Env:REMAX_DEVICE_DAT -ErrorAction SilentlyContinue } else { $env:REMAX_DEVICE_DAT = $savedDat }
+    $pinnedDat = Test-PinnedDeviceDat -Hash $script:DeviceDatSha256 -Length $script:DeviceDatBytes
+    Assert-Remax ($pinnedDat.Ok) 'matching device settings size and SHA256 pass'
+    $badDat = Test-PinnedDeviceDat -Hash 'aa' -Length 4
+    Assert-Remax ((-not $badDat.Ok) -and ($badDat.Detail -match 'SHA256')) 'device settings SHA256 mismatch is a clear failure'
+    $restoreArg = Get-PrintUiRestoreArgument 'C:\Settings\remaxsecure.dat'
+    Assert-Remax ($restoreArg -eq 'printui.dll,PrintUIEntry /Sr /n "RemaxSecure" /a "C:\Settings\remaxsecure.dat" d g r') 'PrintUI restore uses /Sr d g r'
+    $beforeMap = @{ Alpha = 'bytes:1:aa'; Beta = 'DWord:1' }
+    $afterMap = @{ Alpha = 'bytes:2:bb'; Beta = 'DWord:1'; Gamma = 'String:x' }
+    Assert-Remax ((Get-DriverDataChangeCount -Before $beforeMap -After $afterMap) -eq 2) 'registry diff counts changed and added values'
+    $setRead = @{ PaperSeen = $true; PaperValue = 'Cassette Feeding Unit'; OutputSeen = $true; OutputValue = 'Inner Finisher E1' }
+    Assert-Remax (-not (Test-PaperSourceUnset $setRead)) 'Cassette Feeding Unit readback is set'
+    Assert-Remax (-not (Test-OutputOptionsUnset $setRead)) 'Inner Finisher E1 readback is set'
+    Assert-Remax (Test-DatRestoreConfirmed -RestoreOk $true -PaperUnset $false -OutputUnset $false -PaperSeen $true -OutputSeen $true -Changed 0) 'UIA readback confirms the dat restore'
+    $unsetRead = @{ PaperSeen = $true; PaperValue = 'Off'; OutputSeen = $true; OutputValue = 'None' }
+    Assert-Remax (Test-PaperSourceUnset $unsetRead) 'an off checkbox is unset'
+    Assert-Remax (Test-OutputOptionsUnset $unsetRead) 'None is unset'
+    Assert-Remax (-not (Test-DatRestoreConfirmed -RestoreOk $true -PaperUnset $true -OutputUnset $false -PaperSeen $true -OutputSeen $true -Changed 3)) 'unset readback does not confirm the dat'
+    Assert-Remax (Test-DatRestoreConfirmed -RestoreOk $true -PaperUnset $false -OutputUnset $false -PaperSeen $false -OutputSeen $false -Changed 2) 'a registry change confirms the dat when the dialog was not read'
+    Assert-Remax (-not (Test-DatRestoreConfirmed -RestoreOk $true -PaperUnset $false -OutputUnset $false -PaperSeen $false -OutputSeen $false -Changed 0)) 'a silent PrintUI restore with no registry change is not confirmed'
+    Assert-Remax (-not (Test-DatRestoreConfirmed -RestoreOk $false -PaperUnset $false -OutputUnset $false -PaperSeen $true -OutputSeen $true -Changed 4)) 'a non-zero PrintUI exit is not confirmed'
     $plan = @(Get-RemaxProgressPlan)
     Assert-Remax ($plan.Count -eq 10) 'progress plan has ten stages'
     Assert-Remax ([string]$plan[0].Stage -eq 'Cleanup' -and [int]$plan[0].Percent -eq 10) 'progress starts at Cleanup 10'

@@ -106,7 +106,12 @@ def main() -> int:
     check_balance(installer)
     check_balance(verify)
     required = [
-        "1.2.5",
+        "1.2.6",
+        "remaxsecure-device-settings.dat",
+        "a206124cad61263c4843a560765a389da3cb2d3ddb70011abbbbf54499f96279",
+        "44692",
+        "source: dat",
+        "Start-Process",
         "REMAX_PS_OUTPUT",
         "REMAX_NO_INPUT_LOCK",
         "Write-Progress",
